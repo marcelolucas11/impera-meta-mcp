@@ -18,8 +18,18 @@ on painel(argumentos)
 end painel
 
 on run
+	my usarIcone()
 	my mostrar()
 end run
+
+-- Garante a logo no Dock enquanto o app está aberto, mesmo que o cache de ícones do Mac esteja velho.
+on usarIcone()
+	try
+		set caminho to (POSIX path of (path to me)) & "Contents/Resources/icone.icns"
+		set imagem to current application's NSImage's alloc()'s initWithContentsOfFile:caminho
+		if imagem is not missing value then current application's NSApp's setApplicationIconImage:imagem
+	end try
+end usarIcone
 
 on reopen
 	my mostrar()

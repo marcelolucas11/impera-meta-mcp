@@ -772,6 +772,9 @@ def _ajustar_bundle(app: Path, executavel: Optional[str], icone: str) -> None:
     })
     if executavel:
         info["CFBundleExecutable"] = executavel
+    # O osacompile aponta o ícone para o catálogo Assets.car (CFBundleIconName), que tem precedência
+    # sobre o .icns. Sem tirar essa chave, o Mac mostra o ícone padrão do applet em vez da logo.
+    info.pop("CFBundleIconName", None)
     info.pop("LSUIElement", None)  # aparece no Dock, com o ponto de "aberto"
     with open(info_path, "wb") as f:
         plistlib.dump(info, f)
@@ -794,7 +797,8 @@ def _criar_applet(destino: Path) -> bool:
         if (RECURSOS / "icone.icns").exists():
             for nome in ("applet.icns", "icone.icns"):
                 shutil.copyfile(RECURSOS / "icone.icns", recursos / nome)
-        _ajustar_bundle(montado, None, "applet")
+            (recursos / "Assets.car").unlink(missing_ok=True)  # catálogo com o ícone padrão do applet
+        _ajustar_bundle(montado, None, "icone")
         subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(montado)], capture_output=True, timeout=120, check=False)
         if destino.exists():
             shutil.rmtree(destino)

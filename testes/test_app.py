@@ -136,6 +136,12 @@ script = painel._script_do_app()
 check("script do app nativo: caminhos reais, sem marcadores", "__PYTHON__" not in script and "__PAINEL__" not in script and str(inst5 / "painel.py") in script)
 check("script do app nativo: reabrir traz a janela, fechar sai, sair avisa o painel",
       "on reopen" in script and "windowWillClose:" in script and "terminate:" in script and "--ao-fechar-app" in script and "--url" in script)
+check("script do app nativo: põe a logo no Dock ao abrir", "setApplicationIconImage:" in script and "icone.icns" in script)
+montado = Path(tempfile.mkdtemp()) / "x.app"; (montado / "Contents/Resources").mkdir(parents=True)
+(montado / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIconName": "applet", "CFBundleIconFile": "applet", "LSUIElement": True}))
+painel._ajustar_bundle(montado, None, "icone")
+info_m = plistlib.loads((montado / "Contents/Info.plist").read_bytes())
+check("bundle do app usa a logo (sem o catálogo de ícone padrão do applet)", "CFBundleIconName" not in info_m and info_m["CFBundleIconFile"] == "icone" and "LSUIElement" not in info_m)
 check("script do app nativo: menu Editar para colar o token e Cmd+W para fechar", '"paste:", "v"' in script and '"performClose:", "w"' in script)
 
 # ── 6. interface: permissões, histórico e segundo plano ──
