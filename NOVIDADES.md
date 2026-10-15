@@ -1,5 +1,9 @@
 # Novidades
 
+## 4.1.1
+
+- Ao atualizar pelo app, os instaladores continuam executáveis (antes perdiam a permissão de execução).
+
 ## 4.1.0
 
 - Botão "Buscar atualização" no app. Quando há versão nova, mostra o que mudou e atualiza com um clique.

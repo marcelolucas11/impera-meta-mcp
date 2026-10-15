@@ -134,6 +134,10 @@ def extrair(zip_path: Path, pasta: Path) -> Path:
                 raise ErroAtualizacao("O pacote tem links simbólicos. Atualização recusada; nada foi alterado.")
         destino = pasta / "extraido"
         zf.extractall(destino)
+        for info in zf.infolist():  # o zipfile não restaura permissões; os instaladores precisam continuar executáveis
+            modo = (info.external_attr >> 16) & 0o777
+            if modo and not info.is_dir():
+                os.chmod(destino / info.filename, modo)
     candidatos = [p.parent for p in destino.rglob("VERSAO") if (p.parent / "painel.py").is_file()]
     if len(candidatos) != 1:
         raise ErroAtualizacao("O pacote não tem a estrutura esperada. Nada foi alterado.")
