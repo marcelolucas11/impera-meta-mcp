@@ -1,0 +1,28 @@
+import json, subprocess, sys
+py, wrap, proj = sys.argv[1:4]
+p = subprocess.Popen([py, wrap, proj], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def send(m): p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+def recv():
+    while True:
+        line = p.stdout.readline()
+        if not line: raise SystemExit("servidor fechou: " + p.stderr.read()[-3000:])
+        m = json.loads(line)
+        if "id" in m: return m
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}); recv()
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}); tools = recv()["result"]["tools"]
+print("ferramentas:", [t["name"] for t in tools])
+assert all("cliente" in t["inputSchema"].get("properties", {}) for t in tools if t["name"] != "listar_clientes")
+# 6 chamadas disparadas de uma vez, alternando clientes
+for i in range(6):
+    send({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {"cliente": "primos" if i % 2 == 0 else "donaco", "desde": "2026-09-01", "ate": "2026-09-02"}}})
+ordem, ok = [], True
+for _ in range(6):
+    r = recv(); i = r["id"] - 10; esperado = "primos" if i % 2 == 0 else "donaco"; txt = r["result"]["content"][0]["text"]
+    certo = f"Cliente: {esperado}" in txt and f"campanha-do-{esperado}" in txt and ("111.00" if esperado == "primos" else "333.00") in txt and "ERRO" not in txt
+    ordem.append(f"{i}:{esperado}:{'ok' if certo else 'ERRADO'}"); ok &= certo
+    if not certo: print(txt[:300])
+print("respostas na ordem de chegada:", " ".join(ordem))
+send({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {}}})
+print("sem cliente ->", recv()["result"]["content"][0]["text"][:95])
+p.terminate(); assert ok and len(tools) == 6; print("OK")

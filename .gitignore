@@ -1,0 +1,10 @@
+.env
+.painel.json
+painel.log
+clientes/
+.venv/
+relatorios/
+__pycache__/
+*.bak-*
+testes/shots/
+*.zip

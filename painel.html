@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Impera Meta MCP</title>
+<link rel="icon" href="/recursos/icone.png">
+<style>
+@font-face { font-family: "Montserrat"; src: url("/recursos/montserrat.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+:root {
+  --preto: #000; --painel: #0e0d0a; --painel-2: #16140f; --linha: #2c2618; --linha-forte: #4a3e22;
+  --ouro: #d7b870; --ouro-claro: #ecd9a4; --ouro-fundo: rgba(215,184,112,.09);
+  --marfim: #f3ecdc; --apagado: #a39a82; --ok: #86cfa0; --erro: #f08a75; --erro-fundo: rgba(240,138,117,.1);
+  --canhoto: 52px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--preto); color: var(--marfim); font: 500 14px/1.5 "Montserrat", -apple-system, "Helvetica Neue", sans-serif; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+h1, h2, p { margin: 0; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--ouro-claro); outline-offset: 2px; }
+
+.app { display: grid; grid-template-columns: 304px minmax(0, 1fr); height: 100vh; }
+
+/* ── coluna dos clientes ── */
+.rol { display: flex; flex-direction: column; border-right: 1px solid var(--linha); min-height: 0; }
+.marca { display: flex; align-items: center; gap: 12px; padding: 22px 20px 18px; }
+.marca img { width: 38px; height: 38px; }
+.marca strong { display: block; font-weight: 700; font-size: 15px; letter-spacing: .01em; }
+.marca span { color: var(--apagado); font-size: 12px; }
+.bilhetes { flex: 1; overflow-y: auto; padding: 6px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+
+/* Cada cliente é um bilhete de rifa: canhoto com o estado da conexão, picote, e o corpo com o nome. */
+.bilhete { position: relative; display: grid; grid-template-columns: var(--canhoto) minmax(0, 1fr); width: 100%; padding: 0; text-align: left; background: var(--painel-2); border: 0; border-radius: 9px; cursor: pointer; }
+.bilhete::before, .bilhete::after { content: ""; position: absolute; left: calc(var(--canhoto) - 7px); width: 14px; height: 14px; border-radius: 50%; background: var(--preto); }
+.bilhete::before { top: -7px; } .bilhete::after { bottom: -7px; }
+.bilhete .canhoto { display: grid; place-items: center; border-right: 2px dotted var(--linha-forte); }
+.bilhete .corpo { padding: 12px 14px 12px 16px; min-width: 0; }
+.bilhete .nome { display: block; font-weight: 600; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bilhete .conta { display: block; color: var(--apagado); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bilhete:hover { background: #1c1912; }
+.bilhete[aria-current="true"] { background: var(--ouro); color: #000; }
+.bilhete[aria-current="true"] .conta { color: #3a3015; }
+.bilhete[aria-current="true"] .canhoto { border-right-color: rgba(0,0,0,.45); }
+
+.ponto { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--apagado); }
+.ponto.ok { background: var(--ouro); border-color: var(--ouro); }
+.ponto.erro { background: var(--erro); border-color: var(--erro); }
+.ponto.testando { border-color: var(--ouro); border-top-color: transparent; animation: gira .8s linear infinite; }
+.bilhete[aria-current="true"] .ponto { border-color: #000; }
+.bilhete[aria-current="true"] .ponto.ok { background: #000; }
+.bilhete[aria-current="true"] .ponto.erro { background: #8a1f10; border-color: #8a1f10; }
+.bilhete[aria-current="true"] .ponto.testando { border-top-color: transparent; }
+@keyframes gira { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ponto.testando { animation: none; } }
+
+.novo { margin: 0 16px 14px; padding: 11px 14px; background: transparent; border: 1.5px dashed var(--linha-forte); border-radius: 9px; color: var(--ouro); font-weight: 600; cursor: pointer; text-align: left; }
+.novo:hover { border-color: var(--ouro); background: var(--ouro-fundo); }
+.claude { border-top: 1px solid var(--linha); padding: 14px 20px 18px; font-size: 12.5px; color: var(--apagado); }
+.claude b { display: block; color: var(--marfim); font-weight: 600; font-size: 13px; }
+.claude .acao { margin-top: 8px; }
+
+/* ── ficha ── */
+.ficha { overflow-y: auto; min-height: 0; }
+.miolo { max-width: 860px; padding: 34px 44px 60px; }
+.topo { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+h1 { font-weight: 700; font-size: 30px; line-height: 1.15; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.sub { color: var(--apagado); margin-top: 6px; }
+.estado { display: flex; align-items: center; gap: 9px; font-weight: 600; white-space: nowrap; }
+.estado.ok { color: var(--ouro); } .estado.erro { color: var(--erro); }
+
+section { border-top: 1px solid var(--linha); margin-top: 30px; padding-top: 24px; }
+.cab { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+h2 { font-weight: 600; font-size: 17px; }
+.dica { color: var(--apagado); font-size: 13px; max-width: 62ch; }
+
+.numeros { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
+.numeros div { padding: 2px 18px 2px 0; }
+.numeros div + div { padding-left: 18px; border-left: 1px solid var(--linha); }
+.numeros dt { color: var(--apagado); font-size: 12.5px; }
+.numeros dd { margin: 2px 0 0; font-weight: 700; font-size: 24px; letter-spacing: -.01em; white-space: nowrap; }
+dl { margin: 0; }
+
+.linha { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; align-items: center; padding: 9px 0; }
+.linha > span:first-child, .linha > label:first-child { color: var(--apagado); }
+.campo { width: 100%; max-width: 440px; padding: 9px 12px; background: var(--painel); border: 1px solid var(--linha-forte); border-radius: 7px; }
+.campo:focus { border-color: var(--ouro); outline: none; box-shadow: 0 0 0 3px var(--ouro-fundo); }
+select.campo { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--ouro) 50%), linear-gradient(135deg, var(--ouro) 50%, transparent 50%); background-position: calc(100% - 17px) 17px, calc(100% - 12px) 17px; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 34px; }
+input[type="date"].campo { max-width: 170px; color-scheme: dark; }
+.junto { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+.btn { padding: 9px 16px; border-radius: 7px; border: 1px solid var(--linha-forte); background: var(--painel-2); font-weight: 600; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ouro); }
+.btn.principal { background: var(--ouro); border-color: var(--ouro); color: #000; }
+.btn.principal:hover { background: var(--ouro-claro); border-color: var(--ouro-claro); }
+.btn.perigo { color: var(--erro); border-color: rgba(240,138,117,.4); background: transparent; }
+.btn.perigo:hover { border-color: var(--erro); background: var(--erro-fundo); }
+.btn.leve { padding: 5px 10px; font-size: 12.5px; font-weight: 600; background: transparent; }
+.btn:disabled { opacity: .5; cursor: default; }
+.atalho { padding: 5px 11px; border-radius: 20px; border: 1px solid var(--linha-forte); background: transparent; font-size: 12.5px; cursor: pointer; }
+.atalho:hover { border-color: var(--ouro); color: var(--ouro); }
+
+.aviso { margin-top: 12px; padding: 11px 14px; border-left: 3px solid var(--ouro); background: var(--ouro-fundo); border-radius: 0 7px 7px 0; font-size: 13.5px; }
+.aviso.erro { border-left-color: var(--erro); background: var(--erro-fundo); }
+.aviso.ok { border-left-color: var(--ok); background: rgba(134,207,160,.08); }
+.etiquetas { display: flex; flex-wrap: wrap; gap: 6px; }
+.etiquetas span { padding: 2px 9px; border: 1px solid var(--linha-forte); border-radius: 20px; font-size: 12.5px; }
+
+table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+th { text-align: left; font-weight: 500; color: var(--apagado); font-size: 12.5px; padding: 0 10px 8px 0; border-bottom: 1px solid var(--linha); }
+td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--linha); vertical-align: middle; }
+td.arq { overflow-wrap: anywhere; } td.acoes { text-align: right; white-space: nowrap; padding-right: 0; } th:last-child { padding-right: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+
+.instrucao { padding: 14px 16px; background: var(--painel); border: 1px solid var(--linha-forte); border-radius: 8px; line-height: 1.6; user-select: all; }
+details { margin-top: 12px; } summary { cursor: pointer; color: var(--apagado); font-size: 13px; }
+pre { margin: 10px 0 0; padding: 14px 16px; background: var(--painel); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 500 12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; color: #d9d1bd; }
+.vazio { display: grid; place-content: center; min-height: 100vh; padding: 40px; text-align: center; }
+.vazio p { color: var(--apagado); max-width: 46ch; margin: 10px auto 0; }
+
+@media (max-width: 820px) {
+  .app { grid-template-columns: 1fr; height: auto; }
+  .rol { border-right: 0; border-bottom: 1px solid var(--linha); }
+  .bilhetes { max-height: 240px; }
+  .miolo { padding: 26px 20px 48px; }
+  .topo { flex-direction: column; }
+  .numeros { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 16px; }
+  .numeros div:nth-child(3) { padding-left: 0; border-left: 0; }
+  .linha { grid-template-columns: 1fr; gap: 5px; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app" hidden>
+  <aside class="rol">
+    <div class="marca"><img src="/recursos/icone.png" alt=""><div><strong>Impera Meta MCP</strong><span id="contagem"></span></div></div>
+    <nav class="bilhetes" id="bilhetes" aria-label="Clientes"></nav>
+    <button class="novo" id="btn-novo" type="button">+ Novo cliente</button>
+    <div class="claude" id="claude"></div>
+  </aside>
+  <main class="ficha"><div class="miolo" id="miolo"></div></main>
+</div>
+<div class="vazio" id="sem-chave" hidden>
+  <div><h1>Abra pelo app</h1><p>Esta janela precisa ser aberta pelo app Impera Meta MCP, que está na pasta Aplicativos.</p></div>
+</div>
+
+<script>
+"use strict";
+const CHAVE = new URLSearchParams(location.hash.slice(1)).get("k") || "";
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let estado = { clientes: [], claude: {}, token_antigo: false, hoje: "" };
+let atual = null;            // id do cliente aberto, ou "novo"
+const teste = {};            // id -> {fase: "testando"|"ok"|"erro", dados, erro}
+const resumo = {};           // id -> {fase, dados, erro}
+const exportacao = {};       // id -> {rodando, ok, texto}
+let avisoClaude = "";
+
+async function api(metodo, rota, corpo) {
+  const r = await fetch("/api/" + rota, { method: metodo, headers: { "X-Painel-Chave": CHAVE, "Content-Type": "application/json" }, body: corpo ? JSON.stringify(corpo) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.erro || "Falha ao falar com o painel (HTTP " + r.status + ").");
+  return j;
+}
+const cliente = (id) => estado.clientes.find((c) => c.id === id);
+const dinheiro = (v, moeda) => v == null ? "–" : new Intl.NumberFormat("pt-BR", { style: "currency", currency: moeda || "BRL" }).format(v);
+const numero = (v, casas = 0) => v == null ? "–" : new Intl.NumberFormat("pt-BR", { minimumFractionDigits: casas, maximumFractionDigits: casas }).format(v);
+function dia(base, deslocamento) { const d = new Date(base + "T12:00:00"); d.setDate(d.getDate() + deslocamento); return d.toISOString().slice(0, 10); }
+
+async function carregar() {
+  estado = await api("GET", "estado");
+  if (atual !== "novo" && !cliente(atual)) atual = estado.clientes.length ? estado.clientes[0].id : "novo";
+}
+
+/* ── coluna dos clientes ── */
+function desenharRol() {
+  const n = estado.clientes.length;
+  $("#contagem").textContent = n === 0 ? "nenhum cliente" : n === 1 ? "1 cliente" : n + " clientes";
+  $("#bilhetes").innerHTML = estado.clientes.map((c) => {
+    const t = teste[c.id] || {};
+    const fase = t.fase || "espera";
+    const rotulo = { ok: "conectado", erro: "com erro", testando: "testando", espera: "não testado" }[fase];
+    const contaNome = t.dados && c.conta_padrao ? (t.dados.contas.find((a) => a.id === c.conta_padrao) || {}).nome : "";
+    return `<button class="bilhete" type="button" data-id="${esc(c.id)}" aria-current="${c.id === atual}">
+      <span class="canhoto"><span class="ponto ${fase}" role="img" aria-label="${rotulo}"></span></span>
+      <span class="corpo"><span class="nome">${esc(c.nome)}</span>
+      <span class="conta">${c.conta_padrao ? esc(contaNome || "conta " + c.conta_padrao) : "sem conta padrão"}</span></span></button>`;
+  }).join("");
+  const cl = estado.claude || {};
+  $("#claude").innerHTML = cl.registrado
+    ? `<b>Claude Desktop ligado</b>${esc(avisoClaude || "O Claude já enxerga estes clientes.")}`
+    : `<b>Claude Desktop ainda não ligado</b>${cl.instalado ? "Ligue para o Claude usar estes clientes." : "Não achei o Claude Desktop neste Mac."}
+       <div class="acao"><button class="btn leve" type="button" id="btn-claude">Ligar ao Claude</button></div>`;
+}
+
+/* ── ficha do cliente ── */
+function desenharFicha() {
+  const m = $("#miolo");
+  if (atual === "novo") return desenharNovo(m);
+  const c = cliente(atual);
+  m.innerHTML = `
+    <div class="topo">
+      <div><h1>${esc(c.nome)}</h1><p class="sub" id="sub"></p></div>
+      <div class="junto"><span class="estado" id="estado"></span><button class="btn" type="button" id="btn-testar">Testar conexão</button></div>
+    </div>
+    <div id="erro-teste"></div>
+    <section><div class="cab"><h2>Últimos 7 dias</h2><button class="btn leve" type="button" id="btn-resumo">Atualizar</button></div><div id="resumo"></div></section>
+    <section><div class="cab"><h2>Conexão</h2></div><div id="conexao"></div></section>
+    <section><div class="cab"><h2>Relatórios</h2><button class="btn leve" type="button" id="btn-pasta">Abrir pasta</button></div><div id="relatorios"></div></section>
+    <section><div class="cab"><h2>No projeto do Claude</h2><button class="btn leve" type="button" id="btn-copiar">Copiar instrução</button></div>
+      <p class="dica">Cole nas instruções do projeto deste cliente. Ali dentro, o Claude passa a puxar só os dados dele.</p>
+      <p class="instrucao" id="instrucao" style="margin-top:12px">Neste projeto o cliente do Impera Meta MCP é <b>${esc(c.id)}</b>. Passe cliente="${esc(c.id)}" em toda chamada do servidor meta-ads e nunca consulte outro cliente aqui.</p></section>
+    <section><div class="cab"><h2>Remover cliente</h2></div>
+      <p class="dica">Apaga o token deste Mac. Os relatórios já exportados ficam na pasta. Para invalidar o token de vez, revogue-o também na BM.</p>
+      <div class="junto" id="remover" style="margin-top:12px"><button class="btn perigo" type="button" id="btn-remover">Remover ${esc(c.nome)}</button></div></section>`;
+  desenharTopo(); desenharResumo(); desenharConexao(); desenharRelatorios();
+}
+
+function desenharTopo() {
+  const c = cliente(atual); if (!c) return;
+  const t = teste[c.id] || {};
+  const e = $("#estado");
+  e.className = "estado " + (t.fase === "ok" ? "ok" : t.fase === "erro" ? "erro" : "");
+  e.innerHTML = `<span class="ponto ${t.fase || "espera"}"></span>` + ({ ok: "Conectado", erro: "Com erro", testando: "Testando" }[t.fase] || "Não testado");
+  const conta = t.dados && t.dados.contas.find((a) => a.id === c.conta_padrao);
+  $("#sub").textContent = c.conta_padrao ? "Conta padrão: " + (conta ? conta.nome + " (" + c.conta_padrao + ")" : c.conta_padrao) : "Sem conta padrão";
+  $("#erro-teste").innerHTML = t.fase === "erro" ? `<p class="aviso erro">${esc(t.erro)}</p>` : "";
+  $("#btn-testar").disabled = t.fase === "testando";
+}
+
+function desenharResumo() {
+  const c = cliente(atual); if (!c || !$("#resumo")) return;
+  const r = resumo[c.id] || {};
+  const alvo = $("#resumo");
+  if (!c.conta_padrao) { alvo.innerHTML = `<p class="dica">Escolha a conta padrão em Conexão para ver os números.</p>`; return; }
+  if (r.fase === "carregando") { alvo.innerHTML = `<p class="dica">Puxando da Meta…</p>`; return; }
+  if (r.fase === "erro") { alvo.innerHTML = `<p class="aviso erro">${esc(r.erro)}</p>`; return; }
+  if (r.fase !== "ok") { alvo.innerHTML = `<p class="dica">Ainda não consultado.</p>`; return; }
+  const d = r.dados;
+  if (d.sem_veiculacao) { alvo.innerHTML = `<p class="dica">${esc(d.conta)} não veiculou entre ${esc(d.periodo)}.</p>`; return; }
+  alvo.innerHTML = `<dl class="numeros">
+      <div><dt>Investido</dt><dd>${dinheiro(d.gasto, d.moeda)}</dd></div>
+      <div><dt>Compras</dt><dd>${numero(d.compras)}</dd></div>
+      <div><dt>ROAS</dt><dd>${numero(d.roas, 2)}</dd></div>
+      <div><dt>Custo por compra</dt><dd>${dinheiro(d.cpa, d.moeda)}</dd></div></dl>
+    <p class="dica" style="margin-top:12px">${esc(d.conta)}, de ${esc(d.periodo)}. Atribuição de cada conjunto, como no Gerenciador.</p>`;
+}
+
+function desenharConexao() {
+  const c = cliente(atual); if (!c || !$("#conexao")) return;
+  const t = teste[c.id] || {};
+  const d = t.dados;
+  let contaCampo;
+  if (d && d.contas.length) {
+    const tem = d.contas.some((a) => a.id === c.conta_padrao);
+    contaCampo = `<select class="campo" id="sel-conta" aria-label="Conta padrão">
+      ${c.conta_padrao && tem ? "" : `<option value="">${c.conta_padrao ? "Conta " + esc(c.conta_padrao) + " (fora do alcance deste token)" : "Escolha a conta"}</option>`}
+      ${d.contas.map((a) => `<option value="${esc(a.id)}" ${a.id === c.conta_padrao ? "selected" : ""}>${esc(a.nome)} (${esc(a.id)})${a.status && a.status !== "ATIVA" ? ", " + esc(String(a.status).toLowerCase()) : ""}</option>`).join("")}</select>`;
+  } else {
+    contaCampo = `<span>${c.conta_padrao ? esc(c.conta_padrao) : "Teste a conexão para listar as contas."}</span>`;
+  }
+  $("#conexao").innerHTML = `
+    <div class="linha"><span>Token</span><div class="junto" id="token-area">
+      <span>Guardado neste Mac. Nunca aparece nesta janela.</span><button class="btn leve" type="button" id="btn-trocar">Trocar token</button></div></div>
+    ${d ? `<div class="linha"><span>Dono do token</span><span>${esc(d.dono || "–")}</span></div>` : ""}
+    ${d && d.permissoes ? `<div class="linha"><span>Permissões</span><div class="etiquetas">${d.permissoes.map((p) => `<span>${esc(p)}</span>`).join("") || "nenhuma"}</div></div>` : ""}
+    <div class="linha"><label for="sel-conta">Conta padrão</label>${contaCampo}</div>
+    <div class="linha"><label for="evento">Evento de compra</label><div class="junto">
+      <input class="campo" id="evento" style="max-width:300px" value="${esc(c.evento_compra)}" spellcheck="false" autocomplete="off">
+      <button class="btn leve" type="button" id="btn-evento">Salvar evento</button></div></div>
+    <p class="dica">Deixe "auto" para compras do pixel. Para conversão personalizada, use offsite_conversion.custom.ID.</p>
+    ${d ? d.avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join("") : ""}
+    <div id="msg-conexao"></div>`;
+}
+
+function desenharRelatorios() {
+  const c = cliente(atual); if (!c || !$("#relatorios")) return;
+  const x = exportacao[c.id] || {};
+  const ontem = dia(estado.hoje, -1);
+  const de = x.desde || dia(ontem, -6), ate = x.ate || ontem;
+  const arqs = c.relatorios;
+  $("#relatorios").innerHTML = `
+    <div class="junto">
+      <label>De <input class="campo" type="date" id="desde" value="${de}" max="${estado.hoje}"></label>
+      <label>até <input class="campo" type="date" id="ate" value="${ate}" max="${estado.hoje}"></label>
+      <button class="btn principal" type="button" id="btn-exportar" ${x.rodando || !c.conta_padrao ? "disabled" : ""}>${x.rodando ? "Exportando…" : "Exportar relatório"}</button>
+    </div>
+    <div class="junto" style="margin-top:10px">
+      <button class="atalho" type="button" data-dias="7">7 dias</button><button class="atalho" type="button" data-dias="14">14 dias</button>
+      <button class="atalho" type="button" data-dias="30">30 dias</button><button class="atalho" type="button" data-dias="mes">Este mês</button>
+    </div>
+    ${!c.conta_padrao ? `<p class="aviso">Escolha a conta padrão em Conexão antes de exportar.</p>` : ""}
+    ${x.rodando ? `<p class="aviso">Puxando os dados da Meta. Períodos longos levam alguns minutos; pode deixar esta janela aberta.</p>` : ""}
+    ${!x.rodando && x.texto ? `<p class="aviso ${x.ok ? "ok" : "erro"}">${x.ok ? "Relatório exportado: " + esc(x.arquivo) : esc(x.texto)}</p>
+       ${x.ok ? `<details><summary>Resumo e conferência de somas</summary><pre>${esc(x.texto)}</pre></details>` : ""}` : ""}
+    ${arqs.length ? `<table><thead><tr><th>Arquivo</th><th>Exportado em</th><th class="num">Tamanho</th><th></th></tr></thead><tbody>
+      ${arqs.map((a) => `<tr><td class="arq">${esc(a.nome)}</td><td>${esc(a.quando)}</td><td class="num">${numero(a.kb)} KB</td>
+        <td class="acoes"><button class="btn leve" type="button" data-abrir="${esc(a.nome)}">Abrir</button>
+        <button class="btn leve" type="button" data-mostrar="${esc(a.nome)}">Mostrar no Finder</button></td></tr>`).join("")}</tbody></table>`
+      : `<p class="dica" style="margin-top:14px">Nenhum relatório exportado ainda. O arquivo traz as Tabelas A, B e C do prompt de análise, a conta por dia e os limites de CPA.</p>`}`;
+}
+
+function desenharNovo(m) {
+  const primeiro = estado.clientes.length === 0;
+  m.innerHTML = `
+    <h1>${primeiro ? "Cadastre o primeiro cliente" : "Novo cliente"}</h1>
+    <p class="sub">Cada cliente tem o próprio token. O token fica só neste Mac e nunca aparece nesta janela depois de salvo.</p>
+    ${estado.token_antigo ? `<section><div class="cab"><h2>Token da instalação anterior</h2></div>
+      <p class="dica">Há um token salvo pela versão antiga. Diga de qual cliente ele é para aproveitá-lo.</p>
+      <div class="junto" style="margin-top:12px"><input class="campo" id="nome-antigo" placeholder="Nome do cliente" style="max-width:280px" autocomplete="off">
+      <button class="btn" type="button" id="btn-migrar">Aproveitar token</button></div><div id="msg-migrar"></div></section>` : ""}
+    <section><form id="form-novo" autocomplete="off">
+      <div class="linha"><label for="nome">Nome do cliente</label><input class="campo" id="nome" placeholder="Ex.: Primos Premiações" maxlength="60" required></div>
+      <div class="linha"><label for="token">Token da BM</label><input class="campo" id="token" type="password" placeholder="Cole o token do usuário do sistema" spellcheck="false" autocomplete="new-password" required></div>
+      <p class="dica">Na BM do cliente: Usuários do sistema, Gerar token, com a permissão ads_read. A conta de anúncios precisa estar atribuída a esse usuário.</p>
+      <div class="junto" style="margin-top:18px"><button class="btn principal" type="submit" id="btn-salvar">Salvar e testar</button></div>
+      <div id="msg-novo"></div></form></section>`;
+  $("#nome").focus();
+}
+
+/* ── ações ── */
+async function testar(id, silencioso) {
+  teste[id] = { fase: "testando", dados: (teste[id] || {}).dados };
+  desenharRol(); if (id === atual) desenharTopo();
+  try {
+    const r = await api("POST", `clientes/${id}/testar`);
+    teste[id] = r.ok ? { fase: "ok", dados: r } : { fase: "erro", erro: r.erro };
+    const c = cliente(id);
+    if (r.ok && c && !c.conta_padrao && r.contas.length === 1) {   // só uma conta: vira a padrão
+      await api("POST", `clientes/${id}/config`, { conta_padrao: r.contas[0].id });
+      c.conta_padrao = r.contas[0].id;
+    }
+  } catch (e) { teste[id] = { fase: "erro", erro: e.message }; }
+  desenharRol();
+  if (id === atual) { desenharTopo(); desenharConexao(); desenharRelatorios(); if (teste[id].fase === "ok" && !silencioso) puxarResumo(id); }
+}
+
+async function puxarResumo(id) {
+  const c = cliente(id); if (!c || !c.conta_padrao) { if (id === atual) desenharResumo(); return; }
+  resumo[id] = { fase: "carregando" }; if (id === atual) desenharResumo();
+  try {
+    const r = await api("POST", `clientes/${id}/resumo`);
+    resumo[id] = r.ok ? { fase: "ok", dados: r } : { fase: "erro", erro: r.erro };
+  } catch (e) { resumo[id] = { fase: "erro", erro: e.message }; }
+  if (id === atual) desenharResumo();
+}
+
+function abrirCliente(id) {
+  atual = id; desenharRol(); desenharFicha();
+  if (id !== "novo") { if (!teste[id]) testar(id); else if (!resumo[id] && teste[id].fase === "ok") puxarResumo(id); }
+}
+
+async function exportar() {
+  const id = atual, desde = $("#desde").value, ate = $("#ate").value;
+  exportacao[id] = { rodando: true, desde, ate }; desenharRelatorios();
+  try {
+    const r = await api("POST", `clientes/${id}/exportar`, { desde, ate });
+    exportacao[id] = { rodando: false, ok: r.ok, texto: r.texto, arquivo: r.arquivo, desde, ate };
+    const c = cliente(id); if (c) c.relatorios = r.relatorios;
+  } catch (e) { exportacao[id] = { rodando: false, ok: false, texto: e.message, desde, ate }; }
+  if (id === atual) desenharRelatorios();
+}
+
+function msg(alvo, texto, tipo) { const el = $(alvo); if (el) el.innerHTML = texto ? `<p class="aviso ${tipo || ""}">${esc(texto)}</p>` : ""; }
+
+document.addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button"); if (!b) return;
+  const bilhete = ev.target.closest(".bilhete");
+  if (bilhete) return abrirCliente(bilhete.dataset.id);
+  const c = cliente(atual);
+  try {
+    if (b.id === "btn-novo") return abrirCliente("novo");
+    if (b.id === "btn-testar") return testar(atual);
+    if (b.id === "btn-resumo") return puxarResumo(atual);
+    if (b.id === "btn-exportar") return exportar();
+    if (b.id === "btn-pasta") return void await api("POST", "abrir", { cliente: atual });
+    if (b.dataset.abrir) return void await api("POST", "abrir", { cliente: atual, arquivo: b.dataset.abrir, modo: "abrir" });
+    if (b.dataset.mostrar) return void await api("POST", "abrir", { cliente: atual, arquivo: b.dataset.mostrar, modo: "mostrar" });
+    if (b.dataset.dias) {
+      const ontem = dia(estado.hoje, -1);
+      $("#ate").value = b.dataset.dias === "mes" ? estado.hoje : ontem;
+      $("#desde").value = b.dataset.dias === "mes" ? estado.hoje.slice(0, 8) + "01" : dia(ontem, 1 - Number(b.dataset.dias));
+      return;
+    }
+    if (b.id === "btn-copiar") {
+      await navigator.clipboard.writeText($("#instrucao").textContent.trim());
+      b.textContent = "Instrução copiada"; setTimeout(() => { b.textContent = "Copiar instrução"; }, 1800); return;
+    }
+    if (b.id === "btn-evento") {
+      await api("POST", `clientes/${atual}/config`, { evento_compra: $("#evento").value });
+      c.evento_compra = $("#evento").value.trim() || "auto"; msg("#msg-conexao", "Evento de compra salvo.", "ok"); return;
+    }
+    if (b.id === "btn-trocar") {
+      $("#token-area").innerHTML = `<input class="campo" id="token-novo" type="password" placeholder="Cole o token novo" spellcheck="false" autocomplete="new-password" style="max-width:320px">
+        <button class="btn principal" type="button" id="btn-salvar-token">Salvar e testar</button><button class="btn leve" type="button" id="btn-cancelar-token">Cancelar</button>`;
+      $("#token-novo").focus(); return;
+    }
+    if (b.id === "btn-cancelar-token") return desenharConexao();
+    if (b.id === "btn-salvar-token") {
+      await api("POST", "clientes", { id: atual, token: $("#token-novo").value });
+      delete resumo[atual]; desenharConexao(); return testar(atual);
+    }
+    if (b.id === "btn-remover") {
+      $("#remover").innerHTML = `<span>Remover ${esc(c.nome)} e apagar o token deste Mac?</span>
+        <button class="btn perigo" type="button" id="btn-remover-sim">Remover</button><button class="btn leve" type="button" id="btn-remover-nao">Cancelar</button>`; return;
+    }
+    if (b.id === "btn-remover-nao") return desenharFicha();
+    if (b.id === "btn-remover-sim") {
+      await api("DELETE", `clientes/${atual}`); delete teste[atual]; delete resumo[atual]; delete exportacao[atual];
+      atual = null; await carregar(); return abrirCliente(atual);
+    }
+    if (b.id === "btn-claude") {
+      const r = await api("POST", "claude/registrar"); estado.claude = r.claude;
+      avisoClaude = r.ok ? "Feche o Claude (Cmd+Q) e abra de novo para ele carregar." : "";
+      desenharRol(); if (!r.ok) $("#claude").insertAdjacentHTML("beforeend", `<p class="aviso erro">Não consegui alterar a configuração do Claude (${esc(r.status)}).</p>`); return;
+    }
+    if (b.id === "btn-migrar") {
+      const r = await api("POST", "migrar", { nome: $("#nome-antigo").value }); await carregar(); return abrirCliente(r.id);
+    }
+  } catch (e) {
+    const alvo = b.id === "btn-migrar" ? "#msg-migrar" : $("#msg-conexao") && b.closest("#conexao") ? "#msg-conexao" : null;
+    if (alvo) msg(alvo, e.message, "erro"); else if (b.isConnected) b.insertAdjacentHTML("afterend", `<p class="aviso erro" style="flex-basis:100%">${esc(e.message)}</p>`);
+  }
+});
+
+document.addEventListener("change", async (ev) => {
+  if (ev.target.id !== "sel-conta") return;
+  const c = cliente(atual);
+  try {
+    await api("POST", `clientes/${atual}/config`, { conta_padrao: ev.target.value });
+    c.conta_padrao = ev.target.value; delete resumo[atual];
+    desenharRol(); desenharTopo(); desenharRelatorios(); msg("#msg-conexao", "Conta padrão salva.", "ok"); puxarResumo(atual);
+  } catch (e) { msg("#msg-conexao", e.message, "erro"); }
+});
+
+document.addEventListener("submit", async (ev) => {
+  if (ev.target.id !== "form-novo") return;
+  ev.preventDefault();
+  const botao = $("#btn-salvar"); botao.disabled = true; msg("#msg-novo", "");
+  try {
+    const r = await api("POST", "clientes", { nome: $("#nome").value, token: $("#token").value, novo: true });
+    $("#token").value = ""; await carregar(); abrirCliente(r.id);
+  } catch (e) { msg("#msg-novo", e.message, "erro"); botao.disabled = false; }
+});
+
+(async function iniciar() {
+  if (!CHAVE) { $("#sem-chave").hidden = false; return; }
+  try { await carregar(); } catch (e) { $("#sem-chave").hidden = false; $("#sem-chave p").textContent = e.message; return; }
+  $("#app").hidden = false;
+  abrirCliente(atual);
+  for (const c of estado.clientes) if (c.id !== atual) testar(c.id, true);     // acende o canhoto de todos
+  setInterval(() => api("POST", "ping").catch(() => {}), 20000);                // mantém o painel no ar enquanto a janela existe
+})();
+</script>
+</body>
+</html>

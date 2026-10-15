@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""Impera Meta MCP: painel visual do servidor MCP do Meta Ads.
+
+Sobe um servidor só neste computador (127.0.0.1) e abre uma janela para cadastrar
+clientes, testar tokens, escolher a conta padrão e exportar relatórios. Usa o mesmo
+código do servidor MCP (server.py) e o mesmo cadastro (clientes/<nome>.env).
+
+  painel.py --abrir          abre o painel (sobe o servidor se não estiver no ar)
+  painel.py --instalar-app   cria o app em ~/Applications, registra no Claude e abre
+  painel.py --servir         só o servidor (uso interno)
+
+Segurança: escuta apenas em 127.0.0.1, exige uma chave aleatória em toda chamada da
+API, confere Host e Origin, e nunca devolve um token para a janela.
+"""
+
+import argparse
+import asyncio
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import webbrowser
+from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Optional
+
+BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE))
+import configurar  # noqa: E402
+import server  # noqa: E402
+
+ESTADO = BASE / ".painel.json"
+HTML = BASE / "painel.html"
+RECURSOS = BASE / "recursos"
+NOME_APP = "Impera Meta MCP"
+NOMES_ANTIGOS = ("Meta Ads MCP",)  # versões anteriores do app, trocadas por este
+OCIOSO_S = 300  # sem janela aberta por este tempo, o servidor do painel se encerra sozinho
+ABRIR_NO_SISTEMA = True  # os testes desligam, para não abrir Finder/navegador
+
+_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_TOKEN = re.compile(r"^[A-Za-z0-9_\-|.~]+$")
+_EVENTO = re.compile(r"^[a-z0-9_.]+$")
+
+
+class Erro(Exception):
+    def __init__(self, msg: str, status: int = 400):
+        super().__init__(msg)
+        self.status = status
+
+
+# ───────────────────────── operações ─────────────────────────
+
+def _raiz_relatorios() -> Path:
+    d = server._cfg("META_EXPORT_DIR")
+    return Path(d).expanduser() if d else server.BASE_DIR / "relatorios"
+
+
+def _cliente_existente(cid: str) -> dict:
+    if not _ID.match(cid or ""):
+        raise Erro("Cliente inválido.")
+    cs = configurar.clientes()
+    if cid not in cs:
+        raise Erro("Cliente não encontrado.", 404)
+    return cs[cid]
+
+
+def _relatorios(cid: str) -> list:
+    pasta = _raiz_relatorios() / cid
+    if not pasta.is_dir():
+        return []
+    arqs = sorted(pasta.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)[:30]
+    return [{"nome": p.name, "kb": round(p.stat().st_size / 1024),
+             "quando": datetime.fromtimestamp(p.stat().st_mtime).strftime("%d/%m/%Y %H:%M")} for p in arqs]
+
+
+def _claude() -> dict:
+    caminho = configurar.caminho_config_claude()
+    registrado = False
+    try:
+        cfg = json.loads(caminho.read_text(encoding="utf-8"))
+        registrado = (cfg.get("mcpServers") or {}).get(configurar.NOME_SERVIDOR) == configurar.entrada_servidor()
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"registrado": registrado, "instalado": caminho.parent.is_dir()}
+
+
+def op_estado() -> dict:
+    cs = configurar.clientes()
+    raiz = configurar.ler_env(configurar.ENV).get("META_ACCESS_TOKEN", "")
+    return {
+        "clientes": [{
+            "id": cid, "nome": v.get("NOME") or cid,
+            "conta_padrao": v.get("META_AD_ACCOUNT_ID", ""),
+            "evento_compra": v.get("META_PURCHASE_ACTION") or "auto",
+            "pasta": str(_raiz_relatorios() / cid),
+            "relatorios": _relatorios(cid),
+        } for cid, v in cs.items()],
+        "token_antigo": bool(raiz) and raiz != configurar.PLACEHOLDER,
+        "claude": _claude(),
+        "versao_api": server._api_version(),
+        "hoje": date.today().isoformat(),
+    }
+
+
+def op_salvar_cliente(dados: dict) -> dict:
+    nome = " ".join(str(dados.get("nome", "")).split())[:60]
+    cid = str(dados.get("id") or "") or configurar.slug(nome)
+    if not _ID.match(cid):
+        raise Erro("Dê um nome ao cliente (letras e números).")
+    if cid == "padrao":
+        raise Erro("'padrao' é reservado. Escolha outro nome.")
+    token = str(dados.get("token", "")).strip().strip('"').strip("'")
+    existe = cid in configurar.clientes()
+    if dados.get("novo") and existe:
+        raise Erro(f"Já existe um cliente '{cid}'. Abra-o na lista para trocar o token.")
+    if not token and not existe:
+        raise Erro("Cole o token do cliente.")
+    valores = {}
+    if token:
+        if not _TOKEN.match(token):
+            raise Erro("Esse texto não parece um token da Meta (tem espaços ou símbolos). Copie o token inteiro, sem aspas.")
+        valores["META_ACCESS_TOKEN"] = token
+    if existe and nome:
+        valores["NOME"] = nome
+    configurar.salvar_cliente(cid, valores, nome)
+    return {"id": cid}
+
+
+async def _testar(cid: str) -> dict:
+    server._usar_cliente(cid)
+    async with server._client() as c:
+        me = await server._get(c, "me", {"fields": "id,name"})
+        perms = None
+        try:
+            p = await server._get(c, "me/permissions", {"limit": 200})
+            perms = sorted(x["permission"] for x in p.get("data", []) if x.get("status") == "granted")
+        except server.MetaError:
+            pass
+        contas = await server._list_accounts(c)
+    avisos = []
+    if perms is not None and not ({"ads_read", "ads_management"} & set(perms)):
+        avisos.append("O token não tem a permissão ads_read. Sem ela não há relatório.")
+    if perms and "ads_management" in perms:
+        avisos.append("O token também tem ads_management (escrita). O painel e o MCP só leem; para relatório basta ads_read.")
+    if not contas:
+        avisos.append("O token não enxerga nenhuma conta de anúncios. Na BM, atribua a conta ao usuário do sistema.")
+    return {
+        "dono": me.get("name"), "permissoes": perms, "avisos": avisos,
+        "contas": [{
+            "id": str(a.get("account_id")), "nome": a.get("name") or str(a.get("account_id")),
+            "status": server._ACCOUNT_STATUS.get(a.get("account_status"), a.get("account_status")),
+            "moeda": a.get("currency"), "bm": (a.get("business") or {}).get("name"),
+        } for a in sorted(contas, key=lambda x: str(x.get("name")))],
+    }
+
+
+async def _resumo(cid: str) -> dict:
+    server._usar_cliente(cid)
+    d2 = date.today() - timedelta(days=1)
+    d1 = d2 - timedelta(days=6)
+    async with server._client() as c:
+        acc = await server._resolve_account(c, None)
+        rows = await server._insights(c, acc["act"], "account", d1, d2, False, [], asyncio.Semaphore(2))
+    t = rows[0] if rows else None
+    return {
+        "conta": acc["nome"], "conta_id": acc["id"], "moeda": acc["moeda"],
+        "periodo": f"{d1.strftime('%d/%m')} a {d2.strftime('%d/%m')}",
+        "sem_veiculacao": t is None,
+        "gasto": t and t["gasto"], "compras": t and t["compras"], "valor": t and t["valor_compras"],
+        "roas": t and t["roas"], "cpa": t and t["cpa"],
+    }
+
+
+def _meta(coro) -> dict:
+    """Roda uma operação contra a Meta e devolve erro legível, sem token."""
+    try:
+        return {"ok": True, **asyncio.run(coro)}
+    except server.MetaError as e:
+        return {"ok": False, "erro": server._scrub(str(e))}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "erro": f"Erro inesperado ({type(e).__name__}): {server._scrub(str(e))}"}
+
+
+def op_config(cid: str, dados: dict) -> dict:
+    _cliente_existente(cid)
+    valores = {}
+    if "conta_padrao" in dados:
+        conta = re.sub(r"^act_", "", str(dados["conta_padrao"]).strip())
+        if conta and not conta.isdigit():
+            raise Erro("ID de conta inválido.")
+        valores["META_AD_ACCOUNT_ID"] = conta
+    if "evento_compra" in dados:
+        ev = str(dados["evento_compra"]).strip() or "auto"
+        if not _EVENTO.match(ev):
+            raise Erro("Evento de compra inválido. Use 'auto' ou algo como offsite_conversion.custom.123.")
+        valores["META_PURCHASE_ACTION"] = ev
+    if "nome" in dados:
+        nome = " ".join(str(dados["nome"]).split())[:60]
+        if nome:
+            valores["NOME"] = nome
+    if valores:
+        configurar.salvar_cliente(cid, valores)
+    return {"ok": True}
+
+
+def op_remover(cid: str) -> dict:
+    _cliente_existente(cid)
+    configurar.arquivo_cliente(cid).unlink()
+    return {"ok": True}
+
+
+def op_exportar(cid: str, dados: dict) -> dict:
+    _cliente_existente(cid)
+    texto = asyncio.run(server.exportar_relatorio(
+        cliente=cid, desde=str(dados.get("desde") or "") or None, ate=str(dados.get("ate") or "") or None))
+    ok = texto.startswith("Arquivo gerado:")
+    return {"ok": ok, "texto": texto, "arquivo": Path(texto.splitlines()[0].split(": ", 1)[1]).name if ok else None,
+            "relatorios": _relatorios(cid)}
+
+
+def op_abrir(dados: dict) -> dict:
+    cid = str(dados.get("cliente", ""))
+    _cliente_existente(cid)
+    pasta = (_raiz_relatorios() / cid).resolve()
+    pasta.mkdir(parents=True, exist_ok=True)
+    alvo = pasta
+    if dados.get("arquivo"):
+        alvo = (pasta / str(dados["arquivo"])).resolve()
+        if alvo.parent != pasta or not alvo.is_file():
+            raise Erro("Arquivo não encontrado.", 404)
+    if ABRIR_NO_SISTEMA and sys.platform == "darwin":
+        cmd = ["open", str(alvo)] if dados.get("modo") == "abrir" or alvo == pasta else ["open", "-R", str(alvo)]
+        subprocess.run(cmd, check=False)
+    return {"ok": True, "caminho": str(alvo)}
+
+
+def op_registrar_claude() -> dict:
+    try:
+        status = configurar.registrar_no_claude(configurar.caminho_config_claude())
+    except OSError as e:
+        status = f"erro: {e}"
+    return {"ok": status in ("ok", "igual"), "status": status, "claude": _claude()}
+
+
+def op_migrar(dados: dict) -> dict:
+    nome = " ".join(str(dados.get("nome", "")).split())[:60]
+    cid = configurar.slug(nome)
+    if not _ID.match(cid) or cid == "padrao":
+        raise Erro("Dê um nome ao cliente desse token.")
+    if cid in configurar.clientes():
+        raise Erro(f"Já existe um cliente '{cid}'.")
+    if not configurar.migrar_instalacao_antiga(cid, nome):
+        raise Erro("Não há token antigo para mover.")
+    return {"id": cid}
+
+
+# ───────────────────────── servidor HTTP local ─────────────────────────
+
+class Painel(ThreadingHTTPServer):
+    daemon_threads = True
+    chave = ""
+    ultimo = 0.0
+    ativos = 0
+    trava = threading.Lock()
+
+
+_TIPOS = {".woff2": "font/woff2", ".png": "image/png", ".txt": "text/plain; charset=utf-8"}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "MetaAdsPainel"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):  # nada de log de requisição: o corpo pode ter token
+        pass
+
+    def _enviar(self, status: int, corpo: bytes, tipo: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", tipo)
+        self.send_header("Content-Length", str(len(corpo)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+                         "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def _json(self, status: int, obj: dict) -> None:
+        self._enviar(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _origem_ok(self) -> bool:
+        porta = self.server.server_address[1]
+        validos = {f"127.0.0.1:{porta}", f"localhost:{porta}"}
+        if self.headers.get("Host", "") not in validos:  # barra DNS rebinding
+            return False
+        origem = self.headers.get("Origin")
+        return origem is None or origem in {f"http://{h}" for h in validos}
+
+    def _tratar(self, metodo: str) -> None:
+        srv: Painel = self.server  # type: ignore[assignment]
+        with srv.trava:
+            srv.ultimo = time.time()
+            srv.ativos += 1
+        try:
+            caminho = self.path.split("?", 1)[0]
+            if not self._origem_ok():
+                return self._json(403, {"erro": "Origem não permitida."})
+            if metodo == "GET" and caminho == "/":
+                return self._enviar(200, HTML.read_bytes(), "text/html; charset=utf-8")
+            if metodo == "GET" and caminho.startswith("/recursos/"):
+                arq = (RECURSOS / caminho[len("/recursos/"):]).resolve()
+                if arq.parent != RECURSOS.resolve() or not arq.is_file() or arq.suffix not in _TIPOS:
+                    return self._json(404, {"erro": "Não encontrado."})
+                return self._enviar(200, arq.read_bytes(), _TIPOS[arq.suffix])
+            if not caminho.startswith("/api/"):
+                return self._json(404, {"erro": "Não encontrado."})
+            if not hmac.compare_digest(self.headers.get("X-Painel-Chave", ""), srv.chave):
+                return self._json(401, {"erro": "Sessão do painel inválida. Feche esta janela e abra o app de novo."})
+            dados = {}
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                if n > 20000:
+                    return self._json(413, {"erro": "Requisição grande demais."})
+                try:
+                    dados = json.loads(self.rfile.read(n).decode("utf-8"))
+                except ValueError:
+                    return self._json(400, {"erro": "JSON inválido."})
+                if not isinstance(dados, dict):
+                    return self._json(400, {"erro": "JSON inválido."})
+            self._json(200, self._rota(metodo, caminho[len("/api/"):], dados))
+        except Erro as e:
+            self._json(e.status, {"erro": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._json(500, {"erro": f"Erro interno ({type(e).__name__}): {server._scrub(str(e))}"})
+        finally:
+            with srv.trava:
+                srv.ativos -= 1
+                srv.ultimo = time.time()
+
+    def _rota(self, metodo: str, rota: str, dados: dict) -> dict:
+        partes = rota.strip("/").split("/")
+        if metodo == "GET" and partes == ["estado"]:
+            return op_estado()
+        if metodo == "POST" and partes == ["ping"]:
+            return {"ok": True}
+        if metodo == "POST" and partes == ["clientes"]:
+            return op_salvar_cliente(dados)
+        if metodo == "POST" and partes == ["abrir"]:
+            return op_abrir(dados)
+        if metodo == "POST" and partes == ["migrar"]:
+            return op_migrar(dados)
+        if metodo == "POST" and partes == ["claude", "registrar"]:
+            return op_registrar_claude()
+        if metodo == "POST" and partes == ["encerrar"]:
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return {"ok": True}
+        if len(partes) >= 2 and partes[0] == "clientes":
+            cid = partes[1]
+            if metodo == "DELETE" and len(partes) == 2:
+                return op_remover(cid)
+            if metodo == "POST" and len(partes) == 3:
+                _cliente_existente(cid)
+                acao = partes[2]
+                if acao == "testar":
+                    return _meta(_testar(cid))
+                if acao == "resumo":
+                    return _meta(_resumo(cid))
+                if acao == "config":
+                    return op_config(cid, dados)
+                if acao == "exportar":
+                    return op_exportar(cid, dados)
+        raise Erro("Rota desconhecida.", 404)
+
+    def do_GET(self):
+        self._tratar("GET")
+
+    def do_POST(self):
+        self._tratar("POST")
+
+    def do_DELETE(self):
+        self._tratar("DELETE")
+
+
+def _gravar_estado(porta: int, chave: str) -> None:
+    fd = os.open(str(ESTADO), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"porta": porta, "chave": chave, "pid": os.getpid()}, f)
+    os.chmod(ESTADO, 0o600)
+
+
+def servir(porta: int = 0, ocioso: int = OCIOSO_S) -> None:
+    srv = Painel(("127.0.0.1", porta), Handler)
+    srv.chave = secrets.token_urlsafe(32)
+    srv.ultimo = time.time()
+    _gravar_estado(srv.server_address[1], srv.chave)
+
+    def vigia():
+        while True:
+            time.sleep(5)
+            with srv.trava:
+                parado = srv.ativos == 0 and time.time() - srv.ultimo > ocioso
+            if parado:
+                srv.shutdown()
+                return
+
+    threading.Thread(target=vigia, daemon=True).start()
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()
+        try:
+            atual = json.loads(ESTADO.read_text())
+            if atual.get("pid") == os.getpid():
+                ESTADO.unlink()
+        except (OSError, ValueError):
+            pass
+
+
+# ───────────────────────── abrir / instalar ─────────────────────────
+
+def _no_ar() -> Optional[dict]:
+    try:
+        est = json.loads(ESTADO.read_text())
+        req = urllib.request.Request(f"http://127.0.0.1:{int(est['porta'])}/api/ping", data=b"{}", method="POST",
+                                     headers={"X-Painel-Chave": est["chave"], "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return est if r.status == 200 else None
+    except (OSError, ValueError, KeyError, urllib.error.URLError):
+        return None
+
+
+def garantir_servidor() -> dict:
+    est = _no_ar()
+    if est:
+        return est
+    log = open(BASE / "painel.log", "a")
+    subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir"], stdin=subprocess.DEVNULL,
+                     stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
+    for _ in range(60):
+        time.sleep(0.25)
+        est = _no_ar()
+        if est:
+            return est
+    raise SystemExit(f"O painel não subiu. Veja {BASE / 'painel.log'}.")
+
+
+def abrir_janela(url: str) -> None:
+    if sys.platform == "darwin":
+        # Janela própria, sem barra de endereço, quando há um navegador Chromium instalado.
+        for app in ("Google Chrome", "Microsoft Edge", "Brave Browser"):
+            if any((Path(p) / f"{app}.app").exists() for p in ("/Applications", str(Path.home() / "Applications"))):
+                r = subprocess.run(["open", "-na", app, "--args", f"--app={url}", "--window-size=1180,840"], check=False)
+                if r.returncode == 0:
+                    return
+        subprocess.run(["open", url], check=False)
+    else:
+        webbrowser.open(url)
+
+
+def criar_app() -> Optional[Path]:
+    """Monta o .app neste computador. Por ser criado aqui (e não baixado), o macOS o abre
+    sem o aviso de desenvolvedor não identificado."""
+    if sys.platform != "darwin" and not os.environ.get("PAINEL_FORCAR_APP"):
+        return None
+    # Pasta Aplicativos do Mac quando dá para gravar nela (aparece no Finder e no Launchpad);
+    # senão, a pasta Aplicativos do usuário.
+    pasta = Path("/Applications") if os.access("/Applications", os.W_OK) and not os.environ.get("PAINEL_FORCAR_APP") else Path.home() / "Applications"
+    app = pasta / f"{NOME_APP}.app"
+    # Remove o app com o nome antigo, só se for mesmo o nosso (o lançador aponta para este painel).
+    for antigo in NOMES_ANTIGOS:
+        for base in (Path("/Applications"), Path.home() / "Applications"):
+            velho = base / f"{antigo}.app"
+            try:
+                if "painel.py" in (velho / "Contents" / "MacOS" / "abrir").read_text(encoding="utf-8"):
+                    shutil.rmtree(velho)
+            except OSError:
+                pass
+    macos, res = app / "Contents" / "MacOS", app / "Contents" / "Resources"
+    macos.mkdir(parents=True, exist_ok=True)
+    res.mkdir(parents=True, exist_ok=True)
+    (app / "Contents" / "Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>{NOME_APP}</string>
+  <key>CFBundleDisplayName</key><string>{NOME_APP}</string>
+  <key>CFBundleIdentifier</key><string>local.impera.meta-mcp</string>
+  <key>CFBundleExecutable</key><string>abrir</string>
+  <key>CFBundleIconFile</key><string>icone</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>4.0</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+""", encoding="utf-8")
+    lancador = macos / "abrir"
+    lancador.write_text(f'#!/bin/bash\nexec "{sys.executable}" "{BASE / "painel.py"}" --abrir >> "{BASE / "painel.log"}" 2>&1\n',
+                        encoding="utf-8")
+    lancador.chmod(0o755)
+    if (RECURSOS / "icone.icns").exists():
+        shutil.copyfile(RECURSOS / "icone.icns", res / "icone.icns")
+    os.utime(app, None)  # faz o Finder reler o ícone
+    return app
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Impera Meta MCP: painel visual")
+    ap.add_argument("--abrir", action="store_true")
+    ap.add_argument("--servir", action="store_true")
+    ap.add_argument("--instalar-app", action="store_true")
+    ap.add_argument("--sem-janela", action="store_true")
+    ap.add_argument("--porta", type=int, default=0)
+    ap.add_argument("--ocioso", type=int, default=OCIOSO_S)
+    a = ap.parse_args()
+
+    if a.servir:
+        servir(a.porta, a.ocioso)
+        return
+    if a.instalar_app:
+        app = criar_app()
+        if app:
+            print(f"App criado: {app}")
+        r = op_registrar_claude()
+        print("Claude Desktop: " + {"ok": "servidor 'meta-ads' registrado. Feche o Claude (Cmd+Q) e abra de novo.",
+                                     "igual": "servidor 'meta-ads' já estava registrado."}.get(r["status"], "não registrado (" + r["status"] + "); use o botão no painel."))
+    est = garantir_servidor()
+    url = f"http://127.0.0.1:{est['porta']}/#k={est['chave']}"
+    if a.sem_janela or os.environ.get("PAINEL_SEM_JANELA"):
+        print(f"Painel no ar na porta {est['porta']}.")
+    else:
+        abrir_janela(url)
+        if a.instalar_app:
+            print(f"Painel aberto. Da próxima vez, abra o app \"{NOME_APP}\" pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos.")
+
+
+if __name__ == "__main__":
+    main()
