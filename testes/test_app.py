@@ -157,7 +157,10 @@ with sync_playwright() as pw:
     check("histórico de alterações aparece na ficha", "Orçamento" in pg.locator("#historico").inner_text())
     pg.locator("#permissoes label.chave", has_text="Ativar e pausar").click()
     pg.locator("#permissoes label.chave", has_text="Criar e duplicar").click()
-    pg.fill("#teto", "1.500,00"); pg.click("#btn-permissoes")
+    pg.fill("#teto", "1.500,00")
+    pg.evaluate("desenharPermissoes()")  # o teste de conexão termina e redesenha a ficha no meio da edição
+    check("edição não salva sobrevive a um redesenho", pg.input_value("#teto") == "1.500,00" and pg.locator("#permissoes [data-perm]:checked").count() == 2)
+    pg.click("#btn-permissoes")
     expect(pg.locator("#msg-permissoes")).to_contain_text("Permissões salvas")
     env = (inst6 / "clientes/primos.env").read_text()
     check("salvar permissões grava no cliente (e o teto normalizado)", "PERMISSOES=status,criar" in env and "ORCAMENTO_MAX_DIA=1500" in env, env.replace("\n", " | ")[-70:])

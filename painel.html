@@ -320,6 +320,7 @@ function desenharConexao() {
 }
 
 const historicos = {};   // id -> lista de ações
+const rascunhos = {};    // id -> permissões/teto editados e ainda não salvos (sobrevivem a redesenhos)
 const NOMES_ACAO = { alterar_status: "Ativar/pausar", alterar_orcamento: "Orçamento", renomear: "Renomear", duplicar: "Duplicar",
   criar_campanha: "Criar campanha", criar_conjunto: "Criar conjunto", criar_anuncio: "Criar anúncio" };
 
@@ -330,16 +331,17 @@ function desenharPermissoes() {
     editar: "Mudar o nome de campanhas, conjuntos e anúncios.", criar: "Criar campanhas, conjuntos e anúncios e duplicar o que já existe. Tudo nasce pausado." };
   const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear", criar: "Criar e duplicar" };
   const t = teste[c.id] || {}, d = t.dados;
-  const escrita = (c.permissoes || []).length > 0;
+  const r = rascunhos[c.id] || { permissoes: c.permissoes || [], teto: c.teto || "" };
+  const escrita = r.permissoes.length > 0;
   $("#permissoes").innerHTML = `
     <div class="permissoes">
       <label class="chave"><input type="checkbox" checked disabled><span class="trilho" aria-hidden="true"></span>
         <span><b>Ler dados e relatórios</b><small>Sempre ligado.</small></span></label>
-      ${Object.keys(rot).map((k) => `<label class="chave"><input type="checkbox" data-perm="${esc(k)}" ${(c.permissoes || []).includes(k) ? "checked" : ""}>
+      ${Object.keys(rot).map((k) => `<label class="chave"><input type="checkbox" data-perm="${esc(k)}" ${r.permissoes.includes(k) ? "checked" : ""}>
         <span class="trilho" aria-hidden="true"></span><span><b>${esc(titulos[k] || rot[k])}</b><small>${esc(ajuda[k] || "")}</small></span></label>`).join("")}
     </div>
     <div class="linha"><label for="teto">Teto de orçamento diário</label><div class="junto">
-      <input class="campo" id="teto" style="max-width:180px" inputmode="decimal" placeholder="Sem teto" value="${esc(c.teto)}" autocomplete="off">
+      <input class="campo" id="teto" style="max-width:180px" inputmode="decimal" placeholder="Sem teto" value="${esc(r.teto)}" autocomplete="off">
       <span class="dica">por campanha ou conjunto. Vazio = sem teto.</span></div></div>
     <div class="junto" style="margin-top:8px"><button class="btn principal" type="button" id="btn-permissoes">Salvar permissões</button></div>
     <p class="dica" style="margin-top:12px">Alterações só na conta padrão deste cliente. O Claude Desktop pede sua confirmação antes de cada uma, e tudo fica registrado abaixo.</p>
@@ -530,6 +532,7 @@ document.addEventListener("click", async (ev) => {
       const teto = $("#teto").value;
       try {
         await api("POST", `clientes/${atual}/config`, { permissoes, teto });
+        delete rascunhos[atual];
         await carregar(); desenharPermissoes(); desenharHistorico();
         msg("#msg-permissoes", permissoes.length ? "Permissões salvas. Valem na hora para o Claude." : "Permissões salvas. O Claude só lê os dados deste cliente.", "ok");
       } catch (e) { msg("#msg-permissoes", e.message, "erro"); }
@@ -586,7 +589,17 @@ document.addEventListener("click", async (ev) => {
   }
 });
 
+function guardarRascunho() {
+  if (!$("#permissoes")) return;
+  rascunhos[atual] = {
+    permissoes: [...document.querySelectorAll("#permissoes [data-perm]")].filter((x) => x.checked).map((x) => x.dataset.perm),
+    teto: $("#teto") ? $("#teto").value : "",
+  };
+}
+document.addEventListener("input", (ev) => { if (ev.target.closest && ev.target.closest("#permissoes")) guardarRascunho(); });
+
 document.addEventListener("change", async (ev) => {
+  if (ev.target.closest && ev.target.closest("#permissoes")) { guardarRascunho(); return; }
   if (ev.target.id === "chk-fundo") {
     const ativo = ev.target.checked;
     try {
