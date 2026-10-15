@@ -1,0 +1,48 @@
+name: Testar e publicar
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependências
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt
+          .venv/bin/python -m playwright install --with-deps chromium
+      - name: Testes (API da Meta simulada, nenhum token real)
+        run: bash testes/rodar.sh
+
+  publicar:
+    needs: testes
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Conferir versão
+        run: |
+          test "v$(cat VERSAO)" = "${GITHUB_REF_NAME}" || { echo "A tag ${GITHUB_REF_NAME} não bate com VERSAO $(cat VERSAO)"; exit 1; }
+      - name: Montar pacote
+        run: bash empacotar.sh
+      - name: Notas da versão
+        run: |
+          awk -v v="## $(cat VERSAO)" '$0==v{on=1;next} /^## /{on=0} on' NOVIDADES.md > notas.md
+          cat notas.md
+      - name: Publicar release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/impera-meta-mcp.zip dist/impera-meta-mcp.zip.sha256 \
+            --title "Impera Meta MCP ${GITHUB_REF_NAME}" --notes-file notas.md --latest

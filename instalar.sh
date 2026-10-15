@@ -1,19 +1,28 @@
 #!/bin/bash
-# Instala o Impera Meta MCP: ambiente Python, token (digitado aqui, fora do chat) e registro no Claude.
+# Instala ou atualiza o Impera Meta MCP em ~/meta-ads-mcp.
+# Copia só os arquivos do programa: clientes, tokens, ajustes e relatórios que já existam ficam intactos.
 set -e
 cd "$(dirname "$0")"
 ORIGEM="$(pwd -P)"
 DESTINO="$HOME/meta-ads-mcp"
 
-# Pastas protegidas do macOS (Downloads, Documentos, Mesa) impedem o Claude de iniciar o servidor.
-case "$ORIGEM" in
-  "$HOME/Downloads"*|"$HOME/Documents"*|"$HOME/Desktop"*)
-    echo "Copiando para $DESTINO (o Claude não consegue rodar o servidor a partir de $ORIGEM)..."
-    mkdir -p "$DESTINO"
-    cp -R "$ORIGEM/." "$DESTINO/"
-    cd "$DESTINO"
-    ;;
-esac
+if [ "$ORIGEM" != "$(cd "$DESTINO" 2>/dev/null && pwd -P)" ]; then
+  echo "Instalando em $DESTINO..."
+  mkdir -p "$DESTINO"
+  for item in "$ORIGEM"/* "$ORIGEM"/.[!.]*; do
+    [ -e "$item" ] || continue
+    nome="$(basename "$item")"
+    case "$nome" in
+      # O que é do usuário (ou não faz parte do programa) nunca é copiado por cima.
+      .env|clientes|relatorios|.venv|.painel.json|painel.log|.versoes-anteriores|.git|.github|testes|__pycache__) continue ;;
+    esac
+    cp -R "$item" "$DESTINO/"
+  done
+  cd "$DESTINO"
+fi
+
+# Arquivos vindos de um download carregam a marca de quarentena do macOS; os nossos não precisam dela.
+if command -v xattr >/dev/null 2>&1; then xattr -dr com.apple.quarantine "$DESTINO" 2>/dev/null || true; fi
 
 versao_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; }
 
@@ -43,8 +52,9 @@ else
 fi
 
 echo "Instalando dependências..."
-.venv/bin/python -m pip install -q --upgrade pip
-.venv/bin/python -m pip install -q -r requirements.txt
+.venv/bin/python -m pip install -q --disable-pip-version-check --upgrade pip
+.venv/bin/python -m pip install -q --disable-pip-version-check -r requirements.txt
 
+echo "Versão instalada: $(cat VERSAO 2>/dev/null || echo '?')"
 # Cria o app, liga ao Claude Desktop e abre o painel. Daqui em diante, tudo é feito na janela do app.
 .venv/bin/python painel.py --instalar-app

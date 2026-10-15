@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="68" viewBox="0 0 340 68" role="img" aria-label="Baixar para Mac">
+  <rect x="1" y="1" width="338" height="66" rx="12" fill="#000" stroke="#d7b870" stroke-width="2"/>
+  <g fill="none" stroke="#d7b870" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M38 20v22"/><path d="M29 34l9 9 9-9"/><path d="M27 49h22"/>
+  </g>
+  <text x="66" y="32" fill="#f3ecdc" font-family="Montserrat, -apple-system, Helvetica, Arial, sans-serif" font-size="19" font-weight="700">Baixar para Mac</text>
+  <text x="66" y="51" fill="#a39a82" font-family="Montserrat, -apple-system, Helvetica, Arial, sans-serif" font-size="13" font-weight="500">Impera Meta MCP, versão mais nova</text>
+</svg>

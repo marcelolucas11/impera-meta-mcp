@@ -35,6 +35,7 @@ from typing import Optional
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
+import atualizar  # noqa: E402
 import configurar  # noqa: E402
 import server  # noqa: E402
 
@@ -44,6 +45,7 @@ RECURSOS = BASE / "recursos"
 NOME_APP = "Impera Meta MCP"
 NOMES_ANTIGOS = ("Meta Ads MCP",)  # versões anteriores do app, trocadas por este
 OCIOSO_S = 300  # sem janela aberta por este tempo, o servidor do painel se encerra sozinho
+INSTANCIA = secrets.token_hex(6)  # muda a cada processo; a janela usa para saber que o painel reiniciou
 ABRIR_NO_SISTEMA = True  # os testes desligam, para não abrir Finder/navegador
 
 _ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -108,6 +110,8 @@ def op_estado() -> dict:
         "claude": _claude(),
         "versao_api": server._api_version(),
         "hoje": date.today().isoformat(),
+        "versao": atualizar.versao_local(),
+        "instancia": INSTANCIA,
     }
 
 
@@ -243,6 +247,48 @@ def op_abrir(dados: dict) -> dict:
     return {"ok": True, "caminho": str(alvo)}
 
 
+_busca_cache: dict = {}
+
+
+def op_buscar_atualizacao(forcar: bool) -> dict:
+    agora = time.time()
+    if not forcar and _busca_cache.get("quando", 0) > agora - 600:
+        return _busca_cache["res"]
+    try:
+        info = atualizar.buscar()
+        res = {"ok": True, **{k: info.get(k) for k in ("atual", "nova", "disponivel", "notas", "publicada", "pagina", "mensagem")}}
+    except atualizar.ErroAtualizacao as e:
+        res = {"ok": False, "erro": str(e), "atual": atualizar.versao_local()}
+    _busca_cache.update(quando=agora, res=res)
+    return res
+
+
+def op_aplicar_atualizacao(srv) -> dict:
+    """Baixa e instala a versão nova (só arquivos do programa), refaz o app e reinicia o painel
+    na mesma porta e com a mesma chave, para a janela aberta continuar funcionando."""
+    try:
+        res = atualizar.atualizar()
+    except atualizar.ErroAtualizacao as e:
+        return {"ok": False, "erro": str(e)}
+    if not res.get("atualizado"):
+        return {"ok": True, **res}
+    _busca_cache.clear()
+    # O código novo refaz o app e confere a ligação com o Claude.
+    subprocess.run([sys.executable, str(BASE / "painel.py"), "--pos-atualizacao"], cwd=str(BASE),
+                   capture_output=True, timeout=120, check=False)
+
+    def reiniciar():
+        time.sleep(0.8)  # deixa a resposta chegar na janela
+        log = open(BASE / "painel.log", "a")
+        subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
+        srv.manter_estado = True  # o processo novo regrava o estado; este não pode apagá-lo
+        srv.shutdown()
+
+    threading.Thread(target=reiniciar, daemon=True).start()
+    return {"ok": True, **res, "reiniciando": True}
+
+
 def op_registrar_claude() -> dict:
     try:
         status = configurar.registrar_no_claude(configurar.caminho_config_claude())
@@ -268,6 +314,7 @@ def op_migrar(dados: dict) -> dict:
 class Painel(ThreadingHTTPServer):
     daemon_threads = True
     chave = ""
+    manter_estado = False  # True quando outro processo assume a mesma porta e chave (atualização)
     ultimo = 0.0
     ativos = 0
     trava = threading.Lock()
@@ -363,6 +410,10 @@ class Handler(BaseHTTPRequestHandler):
             return op_migrar(dados)
         if metodo == "POST" and partes == ["claude", "registrar"]:
             return op_registrar_claude()
+        if metodo == "POST" and partes == ["atualizacao", "buscar"]:
+            return op_buscar_atualizacao(bool(dados.get("forcar")))
+        if metodo == "POST" and partes == ["atualizacao", "aplicar"]:
+            return op_aplicar_atualizacao(self.server)
         if metodo == "POST" and partes == ["encerrar"]:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"ok": True}
@@ -400,9 +451,27 @@ def _gravar_estado(porta: int, chave: str) -> None:
     os.chmod(ESTADO, 0o600)
 
 
-def servir(porta: int = 0, ocioso: int = OCIOSO_S) -> None:
-    srv = Painel(("127.0.0.1", porta), Handler)
-    srv.chave = secrets.token_urlsafe(32)
+def servir(porta: int = 0, ocioso: int = OCIOSO_S, reaproveitar: bool = False) -> None:
+    chave = None
+    if reaproveitar:  # depois de uma atualização: mesma porta e mesma chave da janela já aberta
+        try:
+            est = json.loads(ESTADO.read_text())
+            porta, chave = int(est["porta"]), str(est["chave"])
+        except (OSError, ValueError, KeyError):
+            pass
+    srv = None
+    for _ in range(60):  # a versão anterior pode levar alguns instantes para liberar a porta
+        try:
+            srv = Painel(("127.0.0.1", porta), Handler)
+            break
+        except OSError:
+            if not reaproveitar or not porta:
+                raise
+            time.sleep(0.25)
+    if srv is None:
+        srv = Painel(("127.0.0.1", 0), Handler)
+        chave = None
+    srv.chave = chave or secrets.token_urlsafe(32)
     srv.ultimo = time.time()
     _gravar_estado(srv.server_address[1], srv.chave)
 
@@ -422,7 +491,7 @@ def servir(porta: int = 0, ocioso: int = OCIOSO_S) -> None:
         srv.server_close()
         try:
             atual = json.loads(ESTADO.read_text())
-            if atual.get("pid") == os.getpid():
+            if atual.get("pid") == os.getpid() and not srv.manter_estado:
                 ESTADO.unlink()
         except (OSError, ValueError):
             pass
@@ -499,8 +568,8 @@ def criar_app() -> Optional[Path]:
   <key>CFBundleExecutable</key><string>abrir</string>
   <key>CFBundleIconFile</key><string>icone</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>4.0</string>
-  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>{atualizar.versao_local()}</string>
+  <key>CFBundleVersion</key><string>{atualizar.versao_local()}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSUIElement</key><true/>
 </dict></plist>
@@ -523,10 +592,16 @@ def main() -> None:
     ap.add_argument("--sem-janela", action="store_true")
     ap.add_argument("--porta", type=int, default=0)
     ap.add_argument("--ocioso", type=int, default=OCIOSO_S)
+    ap.add_argument("--reaproveitar", action="store_true")
+    ap.add_argument("--pos-atualizacao", action="store_true")
     a = ap.parse_args()
 
     if a.servir:
-        servir(a.porta, a.ocioso)
+        servir(a.porta, a.ocioso, a.reaproveitar)
+        return
+    if a.pos_atualizacao:
+        criar_app()
+        op_registrar_claude()
         return
     if a.instalar_app:
         app = criar_app()

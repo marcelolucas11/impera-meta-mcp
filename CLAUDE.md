@@ -6,10 +6,17 @@ Repositório do app Impera Meta MCP (Mac) e do servidor MCP `meta-ads`. O dono �
 
 1. Aplicar a mudança.
 2. Rodar `bash testes/rodar.sh` (com `CHROMIUM_PATH` se o Playwright não tiver Chromium próprio). Só publicar com tudo passando; teste novo para comportamento novo.
-3. Subir a versão: `CFBundleShortVersionString`/`CFBundleVersion` em `painel.py` e o número no README quando mudar o pacote.
+3. Subir a versão em `VERSAO` (X.Y.Z) e escrever a seção `## X.Y.Z` no topo de `NOVIDADES.md`, em português e do ponto de vista de quem usa o app. Essa seção vira a nota da release e aparece no app em "O que mudou".
 4. Commit em português, explicando o porquê. Push para `main`.
-5. Release com tag `vN.M` e o zip `impera-meta-mcp-vN.zip` (pasta raiz `meta-ads-mcp/`, sem `.venv`, `__pycache__`, `testes/shots`).
-6. Dizer ao Marcelo o que mudou e a linha de instalação da versão nova.
+5. Criar e enviar a tag `vX.Y.Z`. O GitHub Actions (`.github/workflows/publicar.yml`) roda os testes, monta `impera-meta-mcp.zip` + `.sha256` com `empacotar.sh` e publica a release como "latest".
+6. Conferir que a release saiu com os dois arquivos. A partir daí o botão "Buscar atualização" do app de todo mundo oferece a versão nova.
+7. Dizer ao Marcelo o que mudou e lembrar: atualizar pelo app e reiniciar o Claude (Cmd+Q).
+
+## Atualização sem perda de dados
+
+- `atualizar.py` e `instalar.sh` só escrevem arquivos do programa. Nunca tocam em `clientes/`, `.env`, `relatorios/`, `.venv/`, `.painel.json`, `painel.log`, `.versoes-anteriores/`.
+- Qualquer arquivo novo de dados do usuário precisa entrar nessas duas listas de preservação (e no `.gitignore`) antes de existir.
+- O nome do pacote (`impera-meta-mcp.zip`) e a pasta raiz dele (`impera-meta-mcp/`) não mudam: o app instalado e o botão de download do README dependem deles.
 
 ## Regras que não mudam
 

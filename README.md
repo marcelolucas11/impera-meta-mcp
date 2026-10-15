@@ -2,28 +2,43 @@
 
 Um app com janela própria para cadastrar clientes e seus tokens da BM, e um servidor MCP que dá ao Claude Desktop acesso de leitura às contas de anúncios de cada cliente. Tudo roda e fica guardado só neste Mac.
 
-## Instalar ou atualizar
+<p align="center">
+  <a href="https://github.com/marcelolucas11/impera-meta-mcp/releases/latest/download/impera-meta-mcp.zip"><img src="recursos/botao-baixar-mac.svg" alt="Baixar para Mac" width="340"></a>
+</p>
 
-1. Baixe a versão mais nova em **Releases**, neste repositório: o arquivo `impera-meta-mcp-vX.zip` (fica em Downloads).
-2. Abra o Terminal e cole, trocando `vX` pela versão baixada (é a única vez que o Terminal é necessário):
+## Instalar no Mac
+
+1. Clique em **Baixar para Mac** acima. O arquivo `impera-meta-mcp.zip` vai para Downloads.
+2. Abra o zip (duplo clique) e dê duplo clique em **Instalar Impera Meta MCP**.
+3. Na primeira vez, o macOS avisa que não conseguiu verificar o desenvolvedor, porque o app não é assinado pela Apple. Abra **Ajustes do Sistema > Privacidade e Segurança**, role até o aviso do "Instalar Impera Meta MCP" e clique em **Abrir Mesmo Assim**. Depois, dê duplo clique de novo.
+4. O instalador faz o resto e abre o app. Na primeira instalação, feche o Claude (Cmd+Q) e abra de novo.
+
+Prefere sem aviso nenhum? Cole esta linha no Terminal; ela baixa a versão mais nova, confere o checksum e instala:
 
 ```bash
-cd ~/Downloads && unzip -o impera-meta-mcp-vX.zip && bash ~/Downloads/meta-ads-mcp/instalar.sh
+curl -fsSL https://raw.githubusercontent.com/marcelolucas11/impera-meta-mcp/main/instalar-mac.sh | bash
 ```
-
-Para atualizar, é o mesmo caminho: baixar o zip da versão nova e rodar a mesma linha. Clientes, tokens e relatórios ficam como estão.
 
 O instalador:
 
-- copia tudo para `~/meta-ads-mcp`, sem apagar clientes, tokens ou relatórios que já existam;
+- instala sempre em `~/meta-ads-mcp`, sem apagar clientes, tokens, ajustes ou relatórios que já existam;
 - prepara o Python (se o Mac não tiver Python 3.10+, baixa um próprio com o `uv`, sem senha de administrador);
 - cria o app **Impera Meta MCP** na pasta Aplicativos (e remove o app com o nome antigo, se existir);
 - liga o servidor ao Claude Desktop, com backup do arquivo de configuração;
 - abre o app.
 
-3. Na primeira instalação, feche o Claude por completo (Cmd+Q) e abra de novo.
-
 Depois disso, abra o app pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos.
+
+## Atualizar
+
+No app, embaixo na coluna da esquerda, clique em **Buscar atualização**. O app também confere sozinho ao abrir. Quando há versão nova, ele mostra o que mudou e o botão **Atualizar agora**.
+
+- Só os arquivos do programa são trocados. Clientes, tokens, ajustes, relatórios e o ambiente Python ficam como estão.
+- O pacote é conferido pelo checksum publicado antes de instalar; se não conferir, nada é alterado.
+- A versão anterior fica guardada em `~/meta-ads-mcp/.versoes-anteriores/`.
+- Depois de atualizar, feche o Claude (Cmd+Q) e abra de novo para ele usar a versão nova do servidor.
+
+Instalar por cima com o botão de download ou com a linha do Terminal também preserva tudo.
 
 ## O app
 
@@ -111,7 +126,11 @@ Assim, "exporta o relatório dos últimos 7 dias" dentro do projeto PRIMOS puxa 
 | `server.py` | Servidor MCP (stdio) que o Claude Desktop sobe. Somente GET na Marketing API. |
 | `painel.py` + `painel.html` | O app: servidor local em 127.0.0.1 e a janela. |
 | `configurar.py` | Cadastro de clientes pelo Terminal e funções usadas pelo app. |
-| `instalar.sh` | Instalador para Mac. |
+| `atualizar.py` | Busca e instala versões novas pelas releases do GitHub, preservando os dados do usuário. |
+| `instalar.sh` | Instalador para Mac (também usado pelo duplo clique e pela linha do Terminal). |
+| `instalar-mac.sh` | Instalação por uma linha: baixa a release mais nova, confere o checksum e instala. |
+| `empacotar.sh` | Monta `dist/impera-meta-mcp.zip` e o `.sha256` da release. |
+| `VERSAO`, `NOVIDADES.md` | Versão atual e o que mudou em cada uma (vira a nota da release e aparece no app). |
 | `recursos/` | Ícone (logo Impera) e a fonte Montserrat (licença OFL). |
 | `testes/` | Testes contra uma API da Meta simulada. |
 
@@ -121,6 +140,8 @@ Antes de publicar qualquer mudança:
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 bash testes/rodar.sh
 ```
+
+Para publicar uma versão: atualize `VERSAO` e `NOVIDADES.md`, faça o commit e crie a tag `vX.Y.Z`. O GitHub Actions roda os testes, monta o pacote e publica a release; o app de todo mundo passa a oferecer a atualização.
 
 Os testes não usam token real nem chamam a Meta. Cobrem: isolamento entre clientes, chamadas simultâneas pelo protocolo MCP, exportação com conferência de somas, o app num navegador real e a proteção da API local.
 

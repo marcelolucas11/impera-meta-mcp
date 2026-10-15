@@ -12,3 +12,6 @@ echo "== protocolo MCP via stdio: chamadas simultâneas de clientes diferentes =
 "$PY" testes/test_stdio_multi.py "$PY" testes/wrap_server.py .
 echo "== app (painel) num navegador real =="
 PYTHONPATH=testes "$PY" testes/test_painel.py "$PY" . testes
+echo "== atualização: dados do usuário preservados, pacotes ruins recusados, instaladores =="
+mkdir -p testes/shots
+"$PY" testes/test_atualizacao.py .

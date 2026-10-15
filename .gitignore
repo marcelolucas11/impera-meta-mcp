@@ -4,7 +4,9 @@ painel.log
 clientes/
 .venv/
 relatorios/
+.versoes-anteriores/
 __pycache__/
 *.bak-*
 testes/shots/
+dist/
 *.zip
