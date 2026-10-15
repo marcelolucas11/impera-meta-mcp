@@ -141,7 +141,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requiremen
 bash testes/rodar.sh
 ```
 
-Para publicar uma versão: atualize `VERSAO` e `NOVIDADES.md`, faça o commit e crie a tag `vX.Y.Z`. O GitHub Actions roda os testes, monta o pacote e publica a release; o app de todo mundo passa a oferecer a atualização.
+Para publicar uma versão: atualize `VERSAO` e `NOVIDADES.md` e envie para a `main`. O GitHub Actions roda os testes e, se essa versão ainda não tiver release, cria a tag, monta o pacote e publica; o app de todo mundo passa a oferecer a atualização.
 
 Os testes não usam token real nem chamam a Meta. Cobrem: isolamento entre clientes, chamadas simultâneas pelo protocolo MCP, exportação com conferência de somas, o app num navegador real e a proteção da API local.
 

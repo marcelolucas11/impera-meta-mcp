@@ -8,7 +8,7 @@ Repositório do app Impera Meta MCP (Mac) e do servidor MCP `meta-ads`. O dono �
 2. Rodar `bash testes/rodar.sh` (com `CHROMIUM_PATH` se o Playwright não tiver Chromium próprio). Só publicar com tudo passando; teste novo para comportamento novo.
 3. Subir a versão em `VERSAO` (X.Y.Z) e escrever a seção `## X.Y.Z` no topo de `NOVIDADES.md`, em português e do ponto de vista de quem usa o app. Essa seção vira a nota da release e aparece no app em "O que mudou".
 4. Commit em português, explicando o porquê. Push para `main`.
-5. Criar e enviar a tag `vX.Y.Z`. O GitHub Actions (`.github/workflows/publicar.yml`) roda os testes, monta `impera-meta-mcp.zip` + `.sha256` com `empacotar.sh` e publica a release como "latest".
+5. O push na `main` basta: o GitHub Actions (`.github/workflows/publicar.yml`) roda os testes e, se a `VERSAO` ainda não tiver release, cria a tag `vX.Y.Z`, monta `impera-meta-mcp.zip` + `.sha256` com `empacotar.sh` e publica a release como "latest". Não criar tag à mão (o proxy da sessão não permite enviar tags).
 6. Conferir que a release saiu com os dois arquivos. A partir daí o botão "Buscar atualização" do app de todo mundo oferece a versão nova.
 7. Dizer ao Marcelo o que mudou e lembrar: atualizar pelo app e reiniciar o Claude (Cmd+Q).
 
