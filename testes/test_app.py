@@ -136,6 +136,14 @@ script = painel._script_do_app()
 check("script do app nativo: caminhos reais, sem marcadores", "__PYTHON__" not in script and "__PAINEL__" not in script and str(inst5 / "painel.py") in script)
 check("script do app nativo: reabrir traz a janela, fechar sai, sair avisa o painel",
       "on reopen" in script and "windowWillClose:" in script and "terminate:" in script and "--ao-fechar-app" in script and "--url" in script)
+servico = app / "Contents/MacOS/impera-segundo-plano"
+check("o app traz o serviço de segundo plano dentro dele", servico.is_file() and os.access(servico, os.X_OK)
+      and "IMPERA_LAUNCHD=1" in servico.read_text() and "--servir --reaproveitar" in servico.read_text())
+(inst5 / ".env").write_text("SEGUNDO_PLANO=1\n")
+r = rodar(inst5, home5, "--pos-atualizacao", env={"PAINEL_FORCAR_APP": "1"})
+dados5 = plistlib.loads((home5 / "Library/LaunchAgents/local.impera.meta-mcp.plist").read_bytes())
+check("com segundo plano ligado, atualizar faz o serviço rodar de dentro do app (nome e logo no macOS)",
+      dados5["ProgramArguments"] == [str(servico)] and dados5["AssociatedBundleIdentifiers"] == ["local.impera.meta-mcp"], str(dados5.get("ProgramArguments"))[-70:])
 check("script do app nativo: põe a logo no Dock ao abrir", "setApplicationIconImage:" in script and "icone.icns" in script)
 montado = Path(tempfile.mkdtemp()) / "x.app"; (montado / "Contents/Resources").mkdir(parents=True)
 (montado / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIconName": "applet", "CFBundleIconFile": "applet", "LSUIElement": True}))

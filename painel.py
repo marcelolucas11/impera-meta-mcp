@@ -260,13 +260,36 @@ def _launchctl(*args: str) -> bool:
     return subprocess.run(["launchctl", *args], capture_output=True, timeout=20, check=False).returncode == 0
 
 
+SERVICO_NO_APP = "impera-segundo-plano"  # executável dentro do .app que o launchd roda
+
+
+def _servico_no_app() -> Optional[Path]:
+    caminho = caminho_app() / "Contents" / "MacOS" / SERVICO_NO_APP
+    return caminho if caminho.is_file() else None
+
+
+def _escrever_servico_no_app(app: Path) -> None:
+    """O serviço de segundo plano roda a partir de dentro do .app: assim o macOS o mostra em
+    Ajustes > Geral > Itens de Início de Sessão com o nome e a logo do app (e não como "python")."""
+    script = app / "Contents" / "MacOS" / SERVICO_NO_APP
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/bash\n# Impera Meta MCP: painel em segundo plano (iniciado pelo launchd)\n"
+                      "export IMPERA_LAUNCHD=1\n"
+                      f'exec "{sys.executable}" "{BASE / "painel.py"}" --servir --reaproveitar\n', encoding="utf-8")
+    script.chmod(0o755)
+
+
 def _escrever_plist() -> Path:
     destino = _plist_launchd()
     destino.parent.mkdir(parents=True, exist_ok=True)
+    no_app = _servico_no_app()
+    programa = [str(no_app)] if no_app else [sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"]
     with open(destino, "wb") as f:
         plistlib.dump({
             "Label": ROTULO_LAUNCHD,
-            "ProgramArguments": [sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"],
+            "ProgramArguments": programa,
+            "AssociatedBundleIdentifiers": ["local.impera.meta-mcp"],  # o macOS associa o item ao app
+            "AbandonProcessGroup": True,
             "EnvironmentVariables": {"IMPERA_LAUNCHD": "1"},
             "WorkingDirectory": str(BASE),
             "RunAtLoad": True,
@@ -276,6 +299,21 @@ def _escrever_plist() -> Path:
             "ProcessType": "Background",
         }, f)
     return destino
+
+
+def recarregar_servico(atraso: float = 0) -> None:
+    """Reescreve o serviço do launchd e o recarrega (depois de atualizar o app ou mudar o programa).
+    Roda num processo à parte, para sobreviver ao bootout do painel que o chamou."""
+    if not segundo_plano():
+        return
+    _escrever_plist()
+    if sys.platform != "darwin" or not shutil.which("launchctl"):
+        return
+    alvo = f"gui/{os.getuid()}"
+    comando = (f"sleep {atraso}; launchctl bootout {alvo}/{ROTULO_LAUNCHD} >/dev/null 2>&1; sleep 1; "
+               f"launchctl bootstrap {alvo} '{_plist_launchd()}' >/dev/null 2>&1")
+    subprocess.Popen(["/bin/bash", "-c", comando], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def op_segundo_plano(srv, ativo: bool) -> dict:
@@ -799,6 +837,7 @@ def _criar_applet(destino: Path) -> bool:
                 shutil.copyfile(RECURSOS / "icone.icns", recursos / nome)
             (recursos / "Assets.car").unlink(missing_ok=True)  # catálogo com o ícone padrão do applet
         _ajustar_bundle(montado, None, "icone")
+        _escrever_servico_no_app(montado)
         subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(montado)], capture_output=True, timeout=120, check=False)
         if destino.exists():
             shutil.rmtree(destino)
@@ -844,6 +883,7 @@ def criar_app() -> Optional[Path]:
         if app.exists():
             shutil.rmtree(app)
         _criar_lancador(app)
+        _escrever_servico_no_app(app)
     os.utime(app, None)  # faz o Finder reler o ícone
     lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     if os.path.exists(lsregister):
@@ -897,6 +937,9 @@ def main() -> None:
     if a.pos_atualizacao:
         criar_app()
         op_registrar_claude()
+        # Sob o launchd, o painel em execução vai reiniciar com o código novo; em seguida o serviço é
+        # recarregado para rodar de dentro do app (nome e logo em Itens de Início de Sessão).
+        recarregar_servico(atraso=4)
         return
     if a.encerrar:
         print("Painel encerrado." if encerrar_servidor() else "O painel não estava aberto.")
@@ -905,6 +948,7 @@ def main() -> None:
         app = criar_app()
         if app:
             print(f"App criado: {app}")
+        recarregar_servico()
         r = op_registrar_claude()
         print("Claude Desktop: " + {"ok": "servidor 'meta-ads' registrado. Feche o Claude (Cmd+Q) e abra de novo.",
                                      "igual": "servidor 'meta-ads' já estava registrado."}.get(r["status"], "não registrado (" + r["status"] + "); use o botão no painel."))
