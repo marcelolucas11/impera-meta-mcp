@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Meta Ads MCP: servidor local, somente leitura, para o Claude Desktop.
+"""Meta Ads MCP: servidor local do Impera Meta MCP para o Claude Desktop.
 
 Vários clientes, um token por cliente: cada um fica em clientes/<nome>.env ao lado
 deste script. O token vai apenas no cabeçalho Authorization das chamadas à Graph
 API: nunca aparece em URL, log ou resposta de ferramenta. Uma chamada usa somente
 o token do cliente pedido; não existe token "global" que sirva de reserva.
 
-O servidor só faz requisições GET. Não existe caminho de código que crie,
-edite, pause ou apague nada na conta de anúncios.
+Leitura sempre. Escrita (ativar/pausar, orçamento, renomear, criar, duplicar) só
+quando o cliente tem a permissão ligada no app, só na conta padrão do cliente,
+com tudo criado PAUSADO, respeitando o teto de orçamento diário e com registro
+de cada ação em historico/<cliente>.jsonl. Nada é apagado.
 """
 
 import asyncio
@@ -38,6 +40,7 @@ from mcp.types import ToolAnnotations
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"  # só ajustes gerais (versão da API, pasta de saída)
 CLIENTES_DIR = BASE_DIR / "clientes"  # um arquivo <nome>.env por cliente
+HISTORICO_DIR = BASE_DIR / "historico"  # um <nome>.jsonl por cliente com cada alteração feita pelo Claude
 GRAPH_HOST = "https://graph.facebook.com"
 DEFAULT_API_VERSION = "v26.0"
 PLACEHOLDER = "COLE_O_TOKEN_NOVO_AQUI"
@@ -59,7 +62,7 @@ log = logging.getLogger("meta-ads-mcp")
 # Chaves que pertencem a um cliente. Nunca são lidas de outro lugar que não o
 # arquivo do cliente ativo: é isso que impede usar o token de um na conta de outro.
 _POR_CLIENTE = {"META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_BUSINESS_ID",
-                "META_PURCHASE_ACTION", "META_APP_SECRET", "NOME"}
+                "META_PURCHASE_ACTION", "META_APP_SECRET", "NOME", "PERMISSOES", "ORCAMENTO_MAX_DIA"}
 _ATIVO: contextvars.ContextVar = contextvars.ContextVar("cliente_ativo", default=None)
 
 
@@ -174,7 +177,7 @@ def _export_dir() -> Path:
     return p
 
 
-# ───────────────────────── HTTP (somente GET) ─────────────────────────
+# ───────────────────────── HTTP ─────────────────────────
 
 _RATE_CODES = {4, 17, 32, 613}
 
@@ -724,8 +727,12 @@ def _sheet(wb, titulo: str, cols: list, rows: list, linha_resumo: Optional[dict]
 mcp = _Server(
     "meta-ads",
     instructions=(
-        "Leitura da Marketing API da Meta para vários clientes, cada um com o próprio token. Somente "
-        "leitura: nenhuma ferramenta altera campanhas. Use listar_clientes para ver quem está "
+        "Marketing API da Meta para vários clientes, cada um com o próprio token. Leitura sempre "
+        "disponível. Ferramentas de alteração (alterar_status, alterar_orcamento, renomear, duplicar, "
+        "criar_campanha, criar_conjunto, criar_anuncio) só funcionam para clientes com a permissão "
+        "ligada no app Impera Meta MCP, só na conta padrão do cliente, e tudo é criado PAUSADO. "
+        "Antes de qualquer alteração, diga ao usuário exatamente o que vai mudar (cliente, objeto, "
+        "valores antes e depois) e só prossiga com a confirmação dele. Use listar_clientes para ver quem está "
         "configurado e passe 'cliente' em toda chamada quando houver mais de um. Nunca misture dados "
         "de clientes diferentes numa mesma análise ou painel, e diga sempre de qual cliente é cada "
         "número. Para o relatório completo de rifa/sorteio (Tabelas A, B e C do prompt v4) use "
@@ -758,8 +765,11 @@ async def listar_clientes() -> str:
         rows = [{
             "cliente": n, "nome": v.get("NOME") or n, "conta_padrao": v.get("META_AD_ACCOUNT_ID") or "",
             "evento_compra": v.get("META_PURCHASE_ACTION") or "auto", "pasta_relatorios": str(raiz / n),
+            "permissoes": "ler" + "".join("+" + x for x in _parse_permissoes(v.get("PERMISSOES"))),
+            "teto_orcamento_dia": v.get("ORCAMENTO_MAX_DIA") or "",
         } for n, v in cs.items()]
-        return f"{len(rows)} cliente(s):\n" + _csv(rows, ["cliente", "nome", "conta_padrao", "evento_compra", "pasta_relatorios"])
+        return f"{len(rows)} cliente(s):\n" + _csv(rows, ["cliente", "nome", "conta_padrao", "evento_compra", "permissoes",
+                                                         "teto_orcamento_dia", "pasta_relatorios"])
     except Exception as e:
         return _tool_error(e)
 
@@ -784,9 +794,11 @@ async def _verificar_um() -> str:
         linhas.append("Permissões: " + (", ".join(perms) or "nenhuma"))
         if not ({"ads_read", "ads_management"} & set(perms)):
             linhas.append("ATENÇÃO: falta ads_read. Sem ela não há relatório.")
-        if "ads_management" in perms:
-            linhas.append("Obs.: o token tem ads_management (escrita). Este servidor não usa; "
-                          "para relatório basta ads_read.")
+        escrita = _parse_permissoes(_cfg("PERMISSOES"))
+        if escrita and "ads_management" not in perms:
+            linhas.append("ATENÇÃO: o cliente tem permissões de alteração ligadas, mas o token não tem "
+                          "ads_management. Alterações vão falhar até gerar um token com essa permissão.")
+    linhas.append("Permissões no app: ler" + "".join(f", {PERMISSOES[x]}" for x in _parse_permissoes(_cfg("PERMISSOES"))) + ".")
     linhas.append(f"Conta padrão: {_cfg('META_AD_ACCOUNT_ID') or 'não definida'}.")
     acao = _cfg("META_PURCHASE_ACTION")
     linhas.append("Evento de compra: " + (acao if acao and acao.lower() != "auto"
@@ -1055,6 +1067,639 @@ async def exportar_relatorio(
         out += [f"AVISO: {a}" for a in dict.fromkeys(avisos)]
         out.append(f"\nCampanhas por gasto (até 12 de {len(c_camp)}):\n{top}")
         return "\n".join(out)
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── escrita (com permissão) ─────────────────────────
+
+PERMISSOES = {
+    "status": "ativar e pausar",
+    "orcamento": "orçamentos e lances",
+    "editar": "renomear",
+    "criar": "criar e duplicar (sempre pausado)",
+}
+_ESTRATEGIAS = {
+    "menor_custo": "LOWEST_COST_WITHOUT_CAP",
+    "limite_custo": "COST_CAP",
+    "limite_lance": "LOWEST_COST_WITH_BID_CAP",
+    "roas_minimo": "LOWEST_COST_WITH_MIN_ROAS",
+}
+_CTAS = Literal["LEARN_MORE", "SHOP_NOW", "BUY_NOW", "ORDER_NOW", "SIGN_UP", "GET_OFFER", "CONTACT_US", "SUBSCRIBE"]
+_MUDA = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+_CRIA = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+_IMAGENS_OK = {".jpg", ".jpeg", ".png", ".gif"}
+_TIPO_PT = {"campaign": "campanha", "adset": "conjunto", "ad": "anúncio"}
+
+
+def _parse_permissoes(texto: Optional[str]) -> list:
+    itens = {x.strip().lower() for x in (texto or "").split(",")}
+    return [p for p in PERMISSOES if p in itens]
+
+
+def _exigir(permissao: str) -> None:
+    if permissao not in _parse_permissoes(_cfg("PERMISSOES")):
+        raise MetaError(
+            f"O cliente '{_cliente_id()}' não permite {PERMISSOES[permissao]}. Para liberar, abra o app "
+            "Impera Meta MCP, ficha do cliente, seção 'O que o Claude pode fazer'.")
+
+
+def _numero(texto: str) -> Optional[float]:
+    t = (texto or "").strip().replace("R$", "").replace(" ", "")
+    if not t:
+        return None
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _checar_teto(valor_dia: Optional[float], moeda: str) -> None:
+    teto = _numero(_cfg("ORCAMENTO_MAX_DIA"))
+    if valor_dia is not None and teto is not None and valor_dia > teto + 1e-9:
+        raise MetaError(f"Orçamento diário de {moeda} {valor_dia:,.2f} passa do teto de {moeda} {teto:,.2f} definido "
+                        f"para o cliente '{_cliente_id()}' no app. Nada foi alterado.")
+
+
+def _centavos(valor: float, moeda: str) -> int:
+    if valor is None or valor <= 0:
+        raise MetaError("Valores de orçamento e lance precisam ser maiores que zero.")
+    return int(round(valor * (1 if moeda in _ZERO_DECIMAL else 100)))
+
+
+def _registrar(ferramenta: str, alvo: str, parametros: dict, ok: bool, resultado: str) -> None:
+    """Histórico local de cada alteração, por cliente. Nunca contém token nem bytes de imagem."""
+    try:
+        HISTORICO_DIR.mkdir(parents=True, exist_ok=True)
+        arq = HISTORICO_DIR / f"{_cliente_id() or 'padrao'}.jsonl"
+        limpos = {k: (v if not isinstance(v, str) or len(v) < 400 else v[:400] + "…")
+                  for k, v in parametros.items() if v not in (None, "", [], {}) and k != "bytes"}
+        linha = json.dumps({"quando": datetime.now().isoformat(timespec="seconds"), "ferramenta": ferramenta,
+                            "alvo": alvo, "parametros": limpos, "ok": ok, "resultado": resultado[:600]},
+                           ensure_ascii=False)
+        fd = os.open(str(arq), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(_scrub(linha) + "\n")
+        if arq.stat().st_size > 2_000_000:
+            linhas = arq.read_text(encoding="utf-8").splitlines()[-2000:]
+            arq.write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    except OSError:
+        log.warning("não consegui gravar o histórico de ações")
+
+
+def historico(cliente_id: str, limite: int = 30) -> list:
+    arq = HISTORICO_DIR / f"{cliente_id}.jsonl"
+    if not arq.exists():
+        return []
+    out = []
+    for linha in arq.read_text(encoding="utf-8").splitlines()[-limite:]:
+        try:
+            out.append(json.loads(linha))
+        except ValueError:
+            pass
+    return list(reversed(out))
+
+
+def _friendly_escrita(code: Any, msg: str, status: int) -> str:
+    msg = _scrub(msg)
+    if code in (10, 200, 294) or (isinstance(code, int) and 200 <= code <= 299):
+        return ("O token não tem permissão para alterar esta conta. Ele precisa de ads_management e o usuário "
+                f"do sistema precisa ter acesso de anunciante à conta. Nada foi alterado. Detalhe: {msg}")
+    if code == 190:
+        return _friendly(code, msg, status)
+    return f"A Meta recusou a alteração (código {code}): {msg}"
+
+
+async def _post(client: httpx.AsyncClient, path: str, data: dict) -> dict:
+    """POST na Graph API. Só repete quando a Meta recusou antes de processar (limite de chamadas
+    ou falha de conexão); em qualquer dúvida não repete, para nunca criar nada em dobro."""
+    url = f"{GRAPH_HOST}/{_api_version()}/{path.lstrip('/')}"
+    form = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) else str(v))
+            for k, v in data.items() if v is not None}
+    secret = _cfg("META_APP_SECRET")
+    if secret:
+        form["appsecret_proof"] = hmac.new(secret.encode(), _token().encode(), hashlib.sha256).hexdigest()
+    for attempt in range(len(_BACKOFF) + 1):
+        last = attempt == len(_BACKOFF)
+        try:
+            r = await client.post(url, data=form)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if not last:
+                await asyncio.sleep(_BACKOFF[attempt])
+                continue
+            raise MetaError("Não consegui conectar à Meta. Nada foi enviado.")
+        except httpx.HTTPError as e:
+            raise MetaError(f"A conexão caiu durante o envio ({type(e).__name__}). A alteração PODE ter sido "
+                            "aplicada: confira com estrutura_conta antes de repetir.")
+        try:
+            resposta = r.json()
+        except ValueError:
+            resposta = None
+        if r.status_code == 200 and isinstance(resposta, dict) and "error" not in resposta:
+            return resposta
+        err = resposta.get("error", {}) if isinstance(resposta, dict) else {}
+        code = err.get("code")
+        msg = str(err.get("error_user_msg") or err.get("message") or f"HTTP {r.status_code}")
+        if err.get("error_user_title"):
+            msg = f"{err['error_user_title']}: {msg}"
+        if (code in _RATE_CODES or (isinstance(code, int) and 80000 <= code <= 80014)) and not last:
+            await asyncio.sleep(_BACKOFF[attempt])
+            continue
+        if r.status_code >= 500 or code in (1, 2) or err.get("is_transient"):
+            raise MetaError(f"A Meta teve uma falha temporária ({msg}). A alteração PODE ter sido aplicada: "
+                            "confira com estrutura_conta antes de repetir.", code=code)
+        raise MetaError(_friendly_escrita(code, msg, r.status_code), code=code)
+    raise MetaError("Falha inesperada ao enviar para a Meta.")
+
+
+async def _conta_padrao(c: httpx.AsyncClient) -> dict:
+    conta = re.sub(r"\D", "", _cfg("META_AD_ACCOUNT_ID"))
+    if not conta:
+        raise MetaError(f"O cliente '{_cliente_id()}' não tem conta padrão. Alterações só são feitas na conta "
+                        "padrão: escolha uma na ficha do cliente no app.")
+    info = await _get(c, f"act_{conta}", {"fields": "account_id,name,currency"})
+    return {"id": conta, "act": f"act_{conta}", "nome": info.get("name") or conta, "moeda": info.get("currency") or "BRL"}
+
+
+async def _objeto(c: httpx.AsyncClient, obj_id: str, campos: str = "") -> tuple:
+    """Lê o objeto, descobre o tipo e garante que ele é da conta padrão do cliente."""
+    if not re.fullmatch(r"\d{5,25}", str(obj_id)):
+        raise MetaError(f"ID inválido: {obj_id!r}.")
+    conta = await _conta_padrao(c)
+    obj = await _get(c, str(obj_id), {"fields": ",".join(x for x in ("account_id,name", campos) if x), "metadata": "1"})
+    if str(obj.get("account_id")) != conta["id"]:
+        raise MetaError(f"O objeto {obj_id} é da conta {obj.get('account_id')}, não da conta padrão do cliente "
+                        f"'{_cliente_id()}' ({conta['nome']}, {conta['id']}). Nada foi alterado.")
+    tipo = (obj.get("metadata") or {}).get("type") or ""
+    return obj, tipo, conta
+
+
+def _ok_pausado(tipo: str, novo_id: str, nome: str) -> str:
+    fem = tipo == "Campanha"
+    return (f"{tipo} {'criada PAUSADA' if fem else 'criado PAUSADO'}: {nome} (ID {novo_id}). "
+            "Para ativar, use alterar_status com acao='ativar'.")
+
+
+@mcp.tool(annotations=_MUDA)
+async def alterar_status(
+    ids: Annotated[list[str], Field(description="IDs de campanhas, conjuntos ou anúncios (até 50).", min_length=1, max_length=50)],
+    acao: Annotated[Literal["ativar", "pausar"], Field(description="ativar ou pausar.")],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Ativa ou pausa campanhas, conjuntos ou anúncios da conta padrão do cliente. Exige a permissão
+    'ativar e pausar' no app. Confirme com o usuário antes de usar."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("status")
+        status = "ACTIVE" if acao == "ativar" else "PAUSED"
+        linhas = []
+        async with _client() as c:
+            for obj_id in ids:
+                try:
+                    obj, tipo, _ = await _objeto(c, obj_id, "effective_status")
+                    await _post(c, str(obj_id), {"status": status})
+                    msg = f"{_TIPO_PT.get(tipo, tipo or 'objeto')} {obj.get('name')} ({obj_id}): {obj.get('effective_status')} -> {status}"
+                    _registrar("alterar_status", str(obj_id), {"acao": acao}, True, msg)
+                    linhas.append("OK " + msg)
+                except MetaError as e:
+                    _registrar("alterar_status", str(obj_id), {"acao": acao}, False, str(e))
+                    linhas.append(f"ERRO {obj_id}: {_scrub(str(e))}")
+        return f"Cliente: {nome_cliente}\n" + "\n".join(linhas)
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def alterar_orcamento(
+    id: Annotated[str, Field(description="ID da campanha (orçamento de campanha) ou do conjunto.")],
+    orcamento_diario: Annotated[Optional[float], Field(description="Novo orçamento diário, na moeda da conta (ex.: 150.00).", gt=0)] = None,
+    orcamento_total: Annotated[Optional[float], Field(description="Novo orçamento total, na moeda da conta.", gt=0)] = None,
+    limite_cpa: Annotated[Optional[float], Field(description="Novo limite de custo ou de lance do conjunto (bid_amount), na moeda da conta.", gt=0)] = None,
+    roas_minimo: Annotated[Optional[float], Field(description="Novo ROAS mínimo do conjunto (ex.: 2.0), quando a estratégia é de ROAS mínimo.", gt=0)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Altera orçamento diário/total de uma campanha ou conjunto, e limite de CPA ou ROAS mínimo de um
+    conjunto, na conta padrão do cliente. Respeita o teto de orçamento diário do app. Exige a
+    permissão 'orçamentos e lances'. Confirme com o usuário antes de usar."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("orcamento")
+        if all(v is None for v in (orcamento_diario, orcamento_total, limite_cpa, roas_minimo)):
+            raise MetaError("Informe ao menos um valor para alterar.")
+        params = {"orcamento_diario": orcamento_diario, "orcamento_total": orcamento_total,
+                  "limite_cpa": limite_cpa, "roas_minimo": roas_minimo}
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, id)
+            if tipo not in ("campaign", "adset"):
+                raise MetaError(f"Orçamento é de campanha ou conjunto; este ID é {tipo or 'de outro tipo'}.")
+            obj.update(await _get(c, str(id), {"fields": "daily_budget,lifetime_budget"}))
+            moeda = conta["moeda"]
+            if (limite_cpa is not None or roas_minimo is not None) and tipo != "adset":
+                raise MetaError("Limite de CPA e ROAS mínimo são do conjunto de anúncios; este ID é de " + (tipo or "outro tipo") + ".")
+            _checar_teto(orcamento_diario, moeda)
+            dados: dict = {}
+            antes = []
+            if orcamento_diario is not None:
+                dados["daily_budget"] = _centavos(orcamento_diario, moeda)
+                antes.append(f"diário {moeda} {(_minor(obj.get('daily_budget'), moeda) or 0):,.2f} -> {orcamento_diario:,.2f}")
+            if orcamento_total is not None:
+                dados["lifetime_budget"] = _centavos(orcamento_total, moeda)
+                antes.append(f"total {moeda} {(_minor(obj.get('lifetime_budget'), moeda) or 0):,.2f} -> {orcamento_total:,.2f}")
+            if limite_cpa is not None:
+                dados["bid_amount"] = _centavos(limite_cpa, moeda)
+                antes.append(f"limite de CPA -> {moeda} {limite_cpa:,.2f}")
+            if roas_minimo is not None:
+                dados["bid_constraints"] = {"roas_average_floor": int(round(roas_minimo * 10000))}
+                antes.append(f"ROAS mínimo -> {roas_minimo:.2f}")
+            try:
+                await _post(c, str(id), dados)
+            except MetaError as e:
+                _registrar("alterar_orcamento", str(id), params, False, str(e))
+                raise
+        msg = f"{_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}): " + "; ".join(antes)
+        _registrar("alterar_orcamento", str(id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def renomear(
+    id: Annotated[str, Field(description="ID da campanha, conjunto ou anúncio.")],
+    nome: Annotated[str, Field(description="Nome novo.", min_length=1, max_length=400)],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Renomeia uma campanha, conjunto ou anúncio da conta padrão do cliente. Exige a permissão 'renomear'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        async with _client() as c:
+            obj, tipo, _ = await _objeto(c, id)
+            try:
+                await _post(c, str(id), {"name": nome})
+            except MetaError as e:
+                _registrar("renomear", str(id), {"nome": nome}, False, str(e))
+                raise
+        msg = f"{_TIPO_PT.get(tipo, tipo)} {id}: '{obj.get('name')}' -> '{nome}'"
+        _registrar("renomear", str(id), {"nome": nome}, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def duplicar(
+    id: Annotated[str, Field(description="ID da campanha, conjunto ou anúncio a duplicar.")],
+    novo_nome: Annotated[Optional[str], Field(description="Nome da cópia. Vazio: nome original + ' - cópia'.")] = None,
+    quantidade: Annotated[int, Field(description="Quantas cópias (1 a 5).", ge=1, le=5)] = 1,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Duplica uma campanha (com conjuntos e anúncios), um conjunto (com anúncios) ou um anúncio, na conta
+    padrão do cliente. As cópias nascem PAUSADAS. Exige a permissão 'criar e duplicar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = {"novo_nome": novo_nome, "quantidade": quantidade}
+        linhas = []
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, id)
+            if tipo not in ("campaign", "adset", "ad"):
+                raise MetaError(f"Só dá para duplicar campanha, conjunto ou anúncio (este ID é {tipo or 'desconhecido'}).")
+            if tipo in ("campaign", "adset"):
+                orc = await _get(c, str(id), {"fields": "daily_budget"})
+                _checar_teto(_minor(orc.get("daily_budget"), conta["moeda"]), conta["moeda"])
+            chave = {"campaign": "copied_campaign_id", "adset": "copied_adset_id", "ad": "copied_ad_id"}[tipo]
+            for n in range(1, quantidade + 1):
+                dados: dict = {"status_option": "PAUSED", "rename_options": {"rename_suffix": " - cópia"}}
+                if tipo in ("campaign", "adset"):
+                    dados["deep_copy"] = True
+                try:
+                    r = await _post(c, f"{id}/copies", dados)
+                except MetaError as e:
+                    _registrar("duplicar", str(id), params, False, str(e))
+                    raise
+                novo = str(r.get(chave) or "")
+                nome_final = None
+                if novo and novo_nome:
+                    nome_final = novo_nome if quantidade == 1 else f"{novo_nome} {n}"
+                    await _post(c, novo, {"name": nome_final})
+                filhos = len(r.get("ad_object_ids") or [])
+                msg = (f"cópia {n} de {_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}) -> ID {novo}"
+                       + (f" '{nome_final}'" if nome_final else "") + (f", {filhos} objetos internos" if filhos else "") + ", PAUSADA")
+                _registrar("duplicar", str(id), params, True, msg)
+                linhas.append("OK " + msg)
+        return f"Cliente: {nome_cliente}\n" + "\n".join(linhas) + "\nPara ativar, use alterar_status com acao='ativar'."
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_campanha(
+    nome: Annotated[str, Field(description="Nome da campanha.", min_length=1, max_length=400)],
+    objetivo: Annotated[Literal["OUTCOME_SALES", "OUTCOME_LEADS", "OUTCOME_TRAFFIC", "OUTCOME_ENGAGEMENT", "OUTCOME_AWARENESS"],
+                        Field(description="Objetivo da campanha.")] = "OUTCOME_SALES",
+    orcamento_diario: Annotated[Optional[float], Field(description="Orçamento diário da campanha (CBO / Advantage+). Vazio: orçamento fica nos conjuntos.", gt=0)] = None,
+    estrategia_lance: Annotated[Literal["menor_custo", "limite_custo", "limite_lance", "roas_minimo"],
+                                Field(description="Estratégia de lance quando o orçamento é da campanha.")] = "menor_custo",
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria uma campanha PAUSADA na conta padrão do cliente. Exige a permissão 'criar e duplicar'.
+    Depois crie os conjuntos com criar_conjunto e os anúncios com criar_anuncio."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = {"nome": nome, "objetivo": objetivo, "orcamento_diario": orcamento_diario, "estrategia_lance": estrategia_lance}
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            _checar_teto(orcamento_diario, conta["moeda"])
+            dados: dict = {"name": nome, "objective": objetivo, "status": "PAUSED", "special_ad_categories": [],
+                           "buying_type": "AUCTION"}
+            if orcamento_diario is not None:
+                dados["daily_budget"] = _centavos(orcamento_diario, conta["moeda"])
+                dados["bid_strategy"] = _ESTRATEGIAS[estrategia_lance]
+            else:
+                dados["is_adset_budget_sharing_enabled"] = False
+            try:
+                r = await _post(c, f"{conta['act']}/campaigns", dados)
+            except MetaError as e:
+                _registrar("criar_campanha", conta["act"], params, False, str(e))
+                raise
+        msg = _ok_pausado("Campanha", str(r.get("id")), nome)
+        _registrar("criar_campanha", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_conjunto(
+    campanha_id: Annotated[str, Field(description="ID da campanha onde o conjunto será criado.")],
+    nome: Annotated[str, Field(description="Nome do conjunto.", min_length=1, max_length=400)],
+    pixel_id: Annotated[Optional[str], Field(description="Pixel/dataset para otimizar (vendas e leads). Vazio: usa o único pixel da conta, se houver só um.")] = None,
+    evento: Annotated[Literal["PURCHASE", "LEAD", "COMPLETE_REGISTRATION", "INITIATED_CHECKOUT", "ADD_TO_CART", "CONTENT_VIEW"],
+                      Field(description="Evento de conversão a otimizar.")] = "PURCHASE",
+    orcamento_diario: Annotated[Optional[float], Field(description="Orçamento diário do conjunto. Obrigatório se a campanha não tiver orçamento.", gt=0)] = None,
+    estrategia_lance: Annotated[Optional[Literal["menor_custo", "limite_custo", "limite_lance", "roas_minimo"]],
+                                Field(description="Só quando o orçamento é do conjunto. Vazio: menor custo.")] = None,
+    limite_cpa: Annotated[Optional[float], Field(description="Limite de custo/lance, se a estratégia pedir.", gt=0)] = None,
+    roas_minimo: Annotated[Optional[float], Field(description="ROAS mínimo, se a estratégia for de ROAS mínimo.", gt=0)] = None,
+    paises: Annotated[list[str], Field(description="Códigos de país (ex.: ['BR']). Ignorado se houver regiões ou cidades.")] = ["BR"],
+    regioes: Annotated[list[str], Field(description="Chaves de estados/regiões (use buscar_localizacao).")] = [],
+    cidades: Annotated[list[str], Field(description="Chaves de cidades (use buscar_localizacao).")] = [],
+    raio_km: Annotated[Optional[int], Field(description="Raio em km em volta das cidades (10 a 80).", ge=10, le=80)] = None,
+    idade_min: Annotated[int, Field(ge=18, le=65)] = 18,
+    idade_max: Annotated[int, Field(ge=18, le=65)] = 65,
+    genero: Annotated[Literal["todos", "homens", "mulheres"], Field()] = "todos",
+    publico_advantage: Annotated[bool, Field(description="Público Advantage+ (a Meta pode expandir além da segmentação).")] = True,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um conjunto de anúncios PAUSADO numa campanha da conta padrão do cliente, otimizando para
+    um evento do pixel (vendas/leads) ou visualização da página (tráfego). Exige a permissão 'criar e duplicar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = {k: v for k, v in dict(campanha_id=campanha_id, nome=nome, pixel_id=pixel_id, evento=evento,
+                  orcamento_diario=orcamento_diario, estrategia_lance=estrategia_lance, limite_cpa=limite_cpa,
+                  roas_minimo=roas_minimo, paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km,
+                  idade_min=idade_min, idade_max=idade_max, genero=genero, publico_advantage=publico_advantage).items()}
+        if idade_min > idade_max:
+            raise MetaError("A idade mínima não pode ser maior que a máxima.")
+        async with _client() as c:
+            camp, tipo, conta = await _objeto(c, campanha_id, "objective,daily_budget,lifetime_budget,bid_strategy")
+            if tipo != "campaign":
+                raise MetaError(f"{campanha_id} não é uma campanha.")
+            moeda = conta["moeda"]
+            objetivo = camp.get("objective")
+            dados: dict = {"name": nome, "campaign_id": str(campanha_id), "status": "PAUSED", "billing_event": "IMPRESSIONS"}
+            if objetivo in ("OUTCOME_SALES", "OUTCOME_LEADS"):
+                if not pixel_id:
+                    pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+                    if len(pixels) != 1:
+                        raise MetaError("Informe o pixel_id. Pixels da conta: " + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in pixels) or "nenhum"))
+                    pixel_id = str(pixels[0]["id"])
+                dados.update(optimization_goal="OFFSITE_CONVERSIONS", destination_type="WEBSITE",
+                             promoted_object={"pixel_id": str(pixel_id), "custom_event_type": evento})
+            elif objetivo == "OUTCOME_TRAFFIC":
+                dados.update(optimization_goal="LANDING_PAGE_VIEWS", destination_type="WEBSITE")
+            else:
+                raise MetaError(f"Criar conjunto do zero está disponível para vendas, leads e tráfego; esta campanha é "
+                                f"{objetivo}. Use duplicar a partir de um conjunto existente.")
+            cbo = bool(camp.get("daily_budget") or camp.get("lifetime_budget"))
+            estrategia = camp.get("bid_strategy") if cbo else _ESTRATEGIAS[estrategia_lance or "menor_custo"]
+            if cbo and orcamento_diario is not None:
+                raise MetaError("Esta campanha tem orçamento próprio (CBO); o conjunto não leva orçamento. Ajuste o da campanha.")
+            if not cbo:
+                if orcamento_diario is None:
+                    raise MetaError("A campanha não tem orçamento: informe orcamento_diario para o conjunto.")
+                _checar_teto(orcamento_diario, moeda)
+                dados["daily_budget"] = _centavos(orcamento_diario, moeda)
+                dados["bid_strategy"] = estrategia
+            if estrategia in ("COST_CAP", "LOWEST_COST_WITH_BID_CAP"):
+                if limite_cpa is None:
+                    raise MetaError("A estratégia de lance pede limite_cpa.")
+                dados["bid_amount"] = _centavos(limite_cpa, moeda)
+            if estrategia == "LOWEST_COST_WITH_MIN_ROAS":
+                if roas_minimo is None:
+                    raise MetaError("A estratégia de lance pede roas_minimo.")
+                dados["bid_constraints"] = {"roas_average_floor": int(round(roas_minimo * 10000))}
+            geo: dict = {"location_types": ["home", "recent"]}
+            if cidades:
+                geo["cities"] = [dict({"key": str(k)}, **({"radius": raio_km, "distance_unit": "kilometer"} if raio_km else {})) for k in cidades]
+            if regioes:
+                geo["regions"] = [{"key": str(k)} for k in regioes]
+            if not cidades and not regioes:
+                geo["countries"] = [p.upper() for p in paises] or ["BR"]
+            alvo: dict = {"geo_locations": geo, "age_min": idade_min, "age_max": idade_max,
+                          "targeting_automation": {"advantage_audience": 1 if publico_advantage else 0}}
+            if genero != "todos":
+                alvo["genders"] = [1] if genero == "homens" else [2]
+            dados["targeting"] = alvo
+            try:
+                r = await _post(c, f"{conta['act']}/adsets", dados)
+            except MetaError as e:
+                _registrar("criar_conjunto", str(campanha_id), params, False, str(e))
+                raise
+        msg = _ok_pausado("Conjunto", str(r.get("id")), nome)
+        _registrar("criar_conjunto", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Campanha: {camp.get('name')} ({campanha_id})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+async def _subir_imagem(c: httpx.AsyncClient, act: str, url: Optional[str], arquivo: Optional[str]) -> str:
+    import base64
+    if arquivo:
+        p = Path(arquivo).expanduser()
+        if p.suffix.lower() not in _IMAGENS_OK or not p.is_file():
+            raise MetaError("imagem_arquivo precisa ser um arquivo .jpg, .jpeg, .png ou .gif existente neste Mac.")
+        if p.stat().st_size > 30 * 1024 * 1024:
+            raise MetaError("A imagem passa de 30 MB.")
+        conteudo, nome = p.read_bytes(), p.name
+    else:
+        if not re.match(r"^https://", url or ""):
+            raise MetaError("imagem_url precisa começar com https://.")
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True, transport=_TRANSPORT) as livre:  # sem token
+            r = await livre.get(url)
+        if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/"):
+            raise MetaError(f"Não consegui baixar uma imagem de {url} (HTTP {r.status_code}).")
+        conteudo, nome = r.content, (url.rsplit("/", 1)[-1].split("?")[0] or "imagem")[:80]
+        if len(conteudo) > 30 * 1024 * 1024:
+            raise MetaError("A imagem passa de 30 MB.")
+    resp = await _post(c, f"{act}/adimages", {"bytes": base64.b64encode(conteudo).decode(), "name": nome})
+    imagens = resp.get("images") or {}
+    for v in imagens.values():
+        if v.get("hash"):
+            return str(v["hash"])
+    raise MetaError("A Meta não devolveu o hash da imagem enviada.")
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_anuncio(
+    conjunto_id: Annotated[str, Field(description="ID do conjunto onde o anúncio será criado.")],
+    nome: Annotated[str, Field(description="Nome do anúncio.", min_length=1, max_length=400)],
+    criativo_id: Annotated[Optional[str], Field(description="Usar um criativo que já existe. Se informado, os campos abaixo são ignorados.")] = None,
+    pagina_id: Annotated[Optional[str], Field(description="Página do Facebook que assina o anúncio (veja listar_paginas).")] = None,
+    instagram_id: Annotated[Optional[str], Field(description="Conta do Instagram que assina o anúncio (opcional).")] = None,
+    link: Annotated[Optional[str], Field(description="URL de destino.")] = None,
+    texto: Annotated[Optional[str], Field(description="Texto principal.")] = None,
+    titulo: Annotated[Optional[str], Field(description="Título.")] = None,
+    descricao: Annotated[Optional[str], Field(description="Descrição.")] = None,
+    imagem_hash: Annotated[Optional[str], Field(description="Imagem que já está na conta (veja listar_midias).")] = None,
+    imagem_url: Annotated[Optional[str], Field(description="Imagem pública (https) para enviar à conta.")] = None,
+    imagem_arquivo: Annotated[Optional[str], Field(description="Caminho de uma imagem neste Mac para enviar à conta.")] = None,
+    video_id: Annotated[Optional[str], Field(description="Vídeo que já está na conta (veja listar_midias).")] = None,
+    cta: Annotated[_CTAS, Field(description="Botão de chamada para ação.")] = "LEARN_MORE",
+    parametros_url: Annotated[Optional[str], Field(description="Parâmetros de URL (UTMs), ex.: utm_source=meta&utm_campaign={{campaign.name}}.")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um anúncio PAUSADO num conjunto da conta padrão do cliente, com um criativo existente ou
+    montando um novo (imagem ou vídeo, texto, título, link e botão). Exige a permissão 'criar e duplicar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = dict(conjunto_id=conjunto_id, nome=nome, criativo_id=criativo_id, pagina_id=pagina_id, instagram_id=instagram_id,
+                      link=link, texto=texto, titulo=titulo, descricao=descricao, imagem_hash=imagem_hash, imagem_url=imagem_url,
+                      imagem_arquivo=imagem_arquivo, video_id=video_id, cta=cta, parametros_url=parametros_url)
+        async with _client() as c:
+            conj, tipo, conta = await _objeto(c, conjunto_id)
+            if tipo != "adset":
+                raise MetaError(f"{conjunto_id} não é um conjunto de anúncios.")
+            try:
+                if not criativo_id:
+                    if not (pagina_id and link and texto):
+                        raise MetaError("Para montar o criativo informe pagina_id, link e texto (ou use criativo_id).")
+                    if sum(bool(x) for x in (imagem_hash, imagem_url, imagem_arquivo, video_id)) != 1:
+                        raise MetaError("Informe exatamente uma mídia: imagem_hash, imagem_url, imagem_arquivo ou video_id.")
+                    if imagem_url or imagem_arquivo:
+                        imagem_hash = await _subir_imagem(c, conta["act"], imagem_url, imagem_arquivo)
+                    botao = {"type": cta, "value": {"link": link}}
+                    historia: dict = {"page_id": str(pagina_id)}
+                    if instagram_id:
+                        historia["instagram_user_id"] = str(instagram_id)
+                    if video_id:
+                        miniatura = (await _get(c, str(video_id), {"fields": "picture"})).get("picture")
+                        historia["video_data"] = {k: v for k, v in {"video_id": str(video_id), "message": texto, "title": titulo,
+                                                                     "link_description": descricao, "image_url": miniatura,
+                                                                     "call_to_action": botao}.items() if v}
+                    else:
+                        historia["link_data"] = {k: v for k, v in {"link": link, "message": texto, "name": titulo,
+                                                                    "description": descricao, "image_hash": imagem_hash,
+                                                                    "call_to_action": botao}.items() if v}
+                    criativo = {"name": f"{nome} - criativo", "object_story_spec": historia}
+                    if parametros_url:
+                        criativo["url_tags"] = parametros_url
+                    criativo_id = str((await _post(c, f"{conta['act']}/adcreatives", criativo)).get("id"))
+                r = await _post(c, f"{conta['act']}/ads", {"name": nome, "adset_id": str(conjunto_id),
+                                                           "creative": {"creative_id": str(criativo_id)}, "status": "PAUSED"})
+            except MetaError as e:
+                _registrar("criar_anuncio", str(conjunto_id), params, False, str(e))
+                raise
+        msg = _ok_pausado("Anúncio", str(r.get("id")), nome) + f" Criativo: {criativo_id}."
+        _registrar("criar_anuncio", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conjunto: {conj.get('name')} ({conjunto_id})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# Leituras de apoio para montar campanhas
+
+@mcp.tool(annotations=_RO)
+async def listar_pixels(cliente: _CLIENTE = None) -> str:
+    """Pixels/datasets da conta padrão do cliente (para criar conjuntos de vendas ou leads)."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name,last_fired_time", "limit": 50})
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
+            [{"id": r.get("id"), "nome": r.get("name"), "ultimo_disparo": (r.get("last_fired_time") or "")[:16]} for r in rows],
+            ["id", "nome", "ultimo_disparo"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_paginas(cliente: _CLIENTE = None) -> str:
+    """Páginas do Facebook (e Instagram ligado a elas) que a conta padrão do cliente pode usar nos anúncios."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/promote_pages",
+                                  {"fields": "id,name,instagram_business_account{id,username}", "limit": 100})
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
+            [{"pagina_id": r.get("id"), "pagina": r.get("name"),
+              "instagram_id": (r.get("instagram_business_account") or {}).get("id"),
+              "instagram": (r.get("instagram_business_account") or {}).get("username")} for r in rows],
+            ["pagina_id", "pagina", "instagram_id", "instagram"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_midias(
+    tipo: Annotated[Literal["imagens", "videos"], Field(description="imagens ou videos.")] = "imagens",
+    cliente: _CLIENTE = None,
+) -> str:
+    """Imagens (com hash) ou vídeos (com ID) já enviados à conta padrão do cliente, mais recentes primeiro."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            if tipo == "imagens":
+                rows = await _get(c, f"{conta['act']}/adimages", {"fields": "hash,name,created_time,width,height", "limit": 60})
+                linhas = [{"hash": r.get("hash"), "nome": r.get("name"), "tamanho": f"{r.get('width')}x{r.get('height')}",
+                           "criada": (r.get("created_time") or "")[:10]} for r in rows.get("data", [])]
+                cols = ["hash", "nome", "tamanho", "criada"]
+            else:
+                rows = await _get(c, f"{conta['act']}/advideos", {"fields": "id,title,length,created_time", "limit": 60})
+                linhas = [{"video_id": r.get("id"), "titulo": r.get("title"), "segundos": round(_f(r.get("length"))),
+                           "criado": (r.get("created_time") or "")[:10]} for r in rows.get("data", [])]
+                cols = ["video_id", "titulo", "segundos", "criado"]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} {tipo}\n" + _csv(linhas, cols)
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def buscar_localizacao(
+    termo: Annotated[str, Field(description="Nome da cidade, estado ou país (ex.: 'Feira de Santana').", min_length=2)],
+    tipo: Annotated[Literal["cidade", "regiao", "pais"], Field()] = "cidade",
+    pais: Annotated[str, Field(description="Código do país para restringir a busca.")] = "BR",
+    cliente: _CLIENTE = None,
+) -> str:
+    """Procura chaves de localização da Meta (cidades, estados, países) para usar em criar_conjunto."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        tipos = {"cidade": "city", "regiao": "region", "pais": "country"}
+        async with _client() as c:
+            r = await _get(c, "search", {"type": "adgeolocation", "q": termo, "location_types": json.dumps([tipos[tipo]]),
+                                         "country_code": pais.upper(), "limit": 20})
+        linhas = [{"chave": x.get("key"), "nome": x.get("name"), "estado": x.get("region"), "pais": x.get("country_code")}
+                  for x in r.get("data", [])]
+        return f"Cliente: {nome_cliente} | {len(linhas)} resultado(s) para '{termo}'\n" + _csv(linhas, ["chave", "nome", "estado", "pais"])
     except Exception as e:
         return _tool_error(e)
 

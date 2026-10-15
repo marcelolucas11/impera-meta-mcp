@@ -113,6 +113,25 @@ input[type="date"].campo { max-width: 170px; color-scheme: dark; }
 .aviso.erro { border-left-color: var(--erro); background: var(--erro-fundo); }
 .aviso.ok { border-left-color: var(--ok); background: rgba(134,207,160,.08); }
 .etiquetas { display: flex; flex-wrap: wrap; gap: 6px; }
+.permissoes { display: grid; gap: 2px; max-width: 560px; }
+.chave { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 14px; align-items: start; padding: 10px 0; cursor: pointer; }
+.chave input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.chave .trilho { position: relative; width: 38px; height: 22px; margin-top: 1px; border-radius: 11px; background: var(--painel-2); border: 1px solid var(--linha-forte); transition: background .15s; }
+.chave .trilho::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--apagado); transition: transform .15s, background .15s; }
+.chave input:checked + .trilho { background: var(--ouro); border-color: var(--ouro); }
+.chave input:checked + .trilho::after { transform: translateX(16px); background: #000; }
+.chave input:focus-visible + .trilho { outline: 2px solid var(--ouro-claro); outline-offset: 2px; }
+.chave input:disabled + .trilho { opacity: .55; }
+.chave b { display: block; font-weight: 600; }
+.chave small { display: block; color: var(--apagado); font-size: 12.5px; line-height: 1.45; }
+.fundo .chave { grid-template-columns: 42px minmax(0, 1fr); padding: 2px 0 0; }
+.fundo small { font-size: 12px; }
+.acoes-lista { list-style: none; margin: 0; padding: 0; }
+.acoes-lista li { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--linha); font-size: 13px; }
+.acoes-lista time { color: var(--apagado); white-space: nowrap; }
+.acoes-lista .falhou { color: var(--erro); }
+.acoes-lista b { font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .chave .trilho, .chave .trilho::after { transition: none; } }
 .etiquetas span { padding: 2px 9px; border: 1px solid var(--linha-forte); border-radius: 20px; font-size: 12.5px; }
 
 table { width: 100%; border-collapse: collapse; margin-top: 14px; }
@@ -146,6 +165,7 @@ pre { margin: 10px 0 0; padding: 14px 16px; background: var(--painel); border-ra
     <nav class="bilhetes" id="bilhetes" aria-label="Clientes"></nav>
     <button class="novo" id="btn-novo" type="button">+ Novo cliente</button>
     <div class="claude" id="claude"></div>
+    <div class="claude fundo" id="fundo"></div>
     <div class="versao" id="versao" aria-live="polite"></div>
   </aside>
   <main class="ficha"><div class="miolo" id="miolo"></div></main>
@@ -204,6 +224,17 @@ function desenharRol() {
     ? `<b>Claude Desktop ligado</b>${esc(avisoClaude || "O Claude já enxerga estes clientes.")}`
     : `<b>Claude Desktop ainda não ligado</b>${cl.instalado ? "Ligue para o Claude usar estes clientes." : "Não achei o Claude Desktop neste Mac."}
        <div class="acao"><button class="btn leve" type="button" id="btn-claude">Ligar ao Claude</button></div>`;
+  desenharFundo();
+}
+
+function desenharFundo() {
+  const ligado = !!estado.segundo_plano, disponivel = estado.segundo_plano_disponivel !== false;
+  $("#fundo").innerHTML = `<label class="chave"><input type="checkbox" id="chk-fundo" ${ligado ? "checked" : ""} ${disponivel ? "" : "disabled"}>
+      <span class="trilho" aria-hidden="true"></span>
+      <span><b>Manter em segundo plano</b>
+      <small>${ligado ? "Fechar o app deixa o painel ativo, e ele volta sozinho ao ligar o Mac. Avisa quando houver versão nova."
+                       : "Fechar o app encerra o painel."} O Claude acessa a Meta com o app aberto ou fechado.</small></span></label>
+    <div id="msg-fundo"></div>`;
 }
 
 /* ── ficha do cliente ── */
@@ -219,6 +250,8 @@ function desenharFicha() {
     <div id="erro-teste"></div>
     <section><div class="cab"><h2>Últimos 7 dias</h2><button class="btn leve" type="button" id="btn-resumo">Atualizar</button></div><div id="resumo"></div></section>
     <section><div class="cab"><h2>Conexão</h2></div><div id="conexao"></div></section>
+    <section><div class="cab"><h2>O que o Claude pode fazer</h2></div><div id="permissoes"></div></section>
+    <section><div class="cab"><h2>Alterações feitas pelo Claude</h2><button class="btn leve" type="button" id="btn-historico">Atualizar</button></div><div id="historico"></div></section>
     <section><div class="cab"><h2>Relatórios</h2><button class="btn leve" type="button" id="btn-pasta">Abrir pasta</button></div><div id="relatorios"></div></section>
     <section><div class="cab"><h2>No projeto do Claude</h2><button class="btn leve" type="button" id="btn-copiar">Copiar instrução</button></div>
       <p class="dica">Cole nas instruções do projeto deste cliente. Ali dentro, o Claude passa a puxar só os dados dele.</p>
@@ -226,7 +259,7 @@ function desenharFicha() {
     <section><div class="cab"><h2>Remover cliente</h2></div>
       <p class="dica">Apaga o token deste Mac. Os relatórios já exportados ficam na pasta. Para invalidar o token de vez, revogue-o também na BM.</p>
       <div class="junto" id="remover" style="margin-top:12px"><button class="btn perigo" type="button" id="btn-remover">Remover ${esc(c.nome)}</button></div></section>`;
-  desenharTopo(); desenharResumo(); desenharConexao(); desenharRelatorios();
+  desenharTopo(); desenharResumo(); desenharConexao(); desenharPermissoes(); desenharRelatorios(); puxarHistorico(c.id);
 }
 
 function desenharTopo() {
@@ -284,6 +317,50 @@ function desenharConexao() {
     <p class="dica">Deixe "auto" para compras do pixel. Para conversão personalizada, use offsite_conversion.custom.ID.</p>
     ${d ? d.avisos.map((a) => `<p class="aviso">${esc(a)}</p>`).join("") : ""}
     <div id="msg-conexao"></div>`;
+}
+
+const historicos = {};   // id -> lista de ações
+const NOMES_ACAO = { alterar_status: "Ativar/pausar", alterar_orcamento: "Orçamento", renomear: "Renomear", duplicar: "Duplicar",
+  criar_campanha: "Criar campanha", criar_conjunto: "Criar conjunto", criar_anuncio: "Criar anúncio" };
+
+function desenharPermissoes() {
+  const c = cliente(atual); if (!c || !$("#permissoes")) return;
+  const rot = estado.rotulos_permissoes || {};
+  const ajuda = { status: "Ligar e desligar campanhas, conjuntos e anúncios.", orcamento: "Mudar orçamento diário ou total, limite de CPA e ROAS mínimo.",
+    editar: "Mudar o nome de campanhas, conjuntos e anúncios.", criar: "Criar campanhas, conjuntos e anúncios e duplicar o que já existe. Tudo nasce pausado." };
+  const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear", criar: "Criar e duplicar" };
+  const t = teste[c.id] || {}, d = t.dados;
+  const escrita = (c.permissoes || []).length > 0;
+  $("#permissoes").innerHTML = `
+    <div class="permissoes">
+      <label class="chave"><input type="checkbox" checked disabled><span class="trilho" aria-hidden="true"></span>
+        <span><b>Ler dados e relatórios</b><small>Sempre ligado.</small></span></label>
+      ${Object.keys(rot).map((k) => `<label class="chave"><input type="checkbox" data-perm="${esc(k)}" ${(c.permissoes || []).includes(k) ? "checked" : ""}>
+        <span class="trilho" aria-hidden="true"></span><span><b>${esc(titulos[k] || rot[k])}</b><small>${esc(ajuda[k] || "")}</small></span></label>`).join("")}
+    </div>
+    <div class="linha"><label for="teto">Teto de orçamento diário</label><div class="junto">
+      <input class="campo" id="teto" style="max-width:180px" inputmode="decimal" placeholder="Sem teto" value="${esc(c.teto)}" autocomplete="off">
+      <span class="dica">por campanha ou conjunto. Vazio = sem teto.</span></div></div>
+    <div class="junto" style="margin-top:8px"><button class="btn principal" type="button" id="btn-permissoes">Salvar permissões</button></div>
+    <p class="dica" style="margin-top:12px">Alterações só na conta padrão deste cliente. O Claude Desktop pede sua confirmação antes de cada uma, e tudo fica registrado abaixo.</p>
+    ${escrita && d && d.pode_escrever === false ? `<p class="aviso erro">O token deste cliente não tem a permissão ads_management. As alterações vão falhar até gerar um token com essa permissão na BM.</p>` : ""}
+    <div id="msg-permissoes"></div>`;
+}
+
+async function puxarHistorico(id) {
+  try { historicos[id] = (await api("POST", `clientes/${id}/historico`)).acoes; } catch (e) { historicos[id] = null; }
+  if (id === atual) desenharHistorico();
+}
+
+function desenharHistorico() {
+  const c = cliente(atual); if (!c || !$("#historico")) return;
+  const lista = historicos[c.id];
+  if (!lista) { $("#historico").innerHTML = `<p class="dica">Carregando…</p>`; return; }
+  if (!lista.length) { $("#historico").innerHTML = `<p class="dica">${(c.permissoes || []).length ? "Nenhuma alteração feita pelo Claude ainda." : "O Claude só lê os dados deste cliente. Ligue uma permissão acima para ele poder alterar."}</p>`; return; }
+  $("#historico").innerHTML = `<ul class="acoes-lista">${lista.map((a) => {
+    const quando = new Date(a.quando); const q = isNaN(quando) ? esc(a.quando) : quando.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    return `<li><time>${q}</time><span><b>${esc(NOMES_ACAO[a.ferramenta] || a.ferramenta)}</b> ${a.ok ? "" : '<span class="falhou">não aplicada</span>'}<br>${esc(a.resultado)}</span></li>`;
+  }).join("")}</ul>`;
 }
 
 function desenharRelatorios() {
@@ -349,7 +426,8 @@ function desenharVersao() {
   else if (a.fase === "aplicando") corpo = `<p>Baixando e instalando a versão ${esc(a.nova)}. Não feche esta janela.</p>`;
   else if (a.fase === "reiniciando") corpo = `<p>Atualizado para ${esc(a.para)}. Reabrindo o app…</p>`;
   else if (a.fase === "concluida") corpo = `<p class="nova">Atualizado para a versão ${esc(estado.versao)}.</p>
-      <p>Para o Claude usar a versão nova, feche o Claude (Cmd+Q) e abra de novo.</p>`;
+      <p>Para o Claude usar a versão nova, feche o Claude (Cmd+Q) e abra de novo.</p>
+      ${/Chrome|Edg\//.test(navigator.userAgent) ? `<p>Esta janela é do navegador. Feche-a e abra o Impera Meta MCP pelo Dock ou pela pasta Aplicativos para usar a janela própria do app.</p>` : ""}`;
   $("#versao").innerHTML = `<div class="topo-versao"><span>Versão ${esc(estado.versao || "–")}</span>
     ${ocupado || ["desatualizado", "reinicie"].includes(a.fase) ? "" : `<button class="btn leve" type="button" id="btn-buscar-atualizacao">Buscar atualização</button>`}</div>${corpo}`;
 }
@@ -396,7 +474,7 @@ async function testar(id, silencioso) {
     }
   } catch (e) { teste[id] = { fase: "erro", erro: e.message }; }
   desenharRol();
-  if (id === atual) { desenharTopo(); desenharConexao(); desenharRelatorios(); if (teste[id].fase === "ok" && !silencioso) puxarResumo(id); }
+  if (id === atual) { desenharTopo(); desenharConexao(); desenharPermissoes(); desenharRelatorios(); if (teste[id].fase === "ok" && !silencioso) puxarResumo(id); }
 }
 
 async function puxarResumo(id) {
@@ -425,6 +503,13 @@ async function exportar() {
   if (id === atual) desenharRelatorios();
 }
 
+async function copiar(texto) {
+  try { await navigator.clipboard.writeText(texto); return; } catch (e) {}
+  const area = document.createElement("textarea"); area.value = texto; area.setAttribute("readonly", "");
+  area.style.position = "fixed"; area.style.opacity = "0"; document.body.appendChild(area); area.select();
+  document.execCommand("copy"); area.remove();
+}
+
 function msg(alvo, texto, tipo) { const el = $(alvo); if (el) el.innerHTML = texto ? `<p class="aviso ${tipo || ""}">${esc(texto)}</p>` : ""; }
 
 document.addEventListener("click", async (ev) => {
@@ -439,6 +524,17 @@ document.addEventListener("click", async (ev) => {
     if (b.id === "btn-reiniciar-painel") { await api("POST", "encerrar").catch(() => {}); atualizacao = { fase: "reinicie" }; return desenharVersao(); }
     if (b.id === "btn-testar") return testar(atual);
     if (b.id === "btn-resumo") return puxarResumo(atual);
+    if (b.id === "btn-historico") { historicos[atual] = null; desenharHistorico(); return puxarHistorico(atual); }
+    if (b.id === "btn-permissoes") {
+      const permissoes = [...document.querySelectorAll("#permissoes [data-perm]")].filter((x) => x.checked).map((x) => x.dataset.perm);
+      const teto = $("#teto").value;
+      try {
+        await api("POST", `clientes/${atual}/config`, { permissoes, teto });
+        await carregar(); desenharPermissoes(); desenharHistorico();
+        msg("#msg-permissoes", permissoes.length ? "Permissões salvas. Valem na hora para o Claude." : "Permissões salvas. O Claude só lê os dados deste cliente.", "ok");
+      } catch (e) { msg("#msg-permissoes", e.message, "erro"); }
+      return;
+    }
     if (b.id === "btn-exportar") return exportar();
     if (b.id === "btn-pasta") return void await api("POST", "abrir", { cliente: atual });
     if (b.dataset.abrir) return void await api("POST", "abrir", { cliente: atual, arquivo: b.dataset.abrir, modo: "abrir" });
@@ -450,7 +546,7 @@ document.addEventListener("click", async (ev) => {
       return;
     }
     if (b.id === "btn-copiar") {
-      await navigator.clipboard.writeText($("#instrucao").textContent.trim());
+      await copiar($("#instrucao").textContent.trim());
       b.textContent = "Instrução copiada"; setTimeout(() => { b.textContent = "Copiar instrução"; }, 1800); return;
     }
     if (b.id === "btn-evento") {
@@ -491,6 +587,14 @@ document.addEventListener("click", async (ev) => {
 });
 
 document.addEventListener("change", async (ev) => {
+  if (ev.target.id === "chk-fundo") {
+    const ativo = ev.target.checked;
+    try {
+      await api("POST", "segundo-plano", { ativo }); estado.segundo_plano = ativo; desenharFundo();
+      msg("#msg-fundo", ativo ? "Ligado." : "Desligado.", "ok");
+    } catch (e) { ev.target.checked = !ativo; msg("#msg-fundo", e.message, "erro"); }
+    return;
+  }
   if (ev.target.id !== "sel-conta") return;
   const c = cliente(atual);
   try {
@@ -514,9 +618,9 @@ document.addEventListener("submit", async (ev) => {
   if (!CHAVE) { $("#sem-chave").hidden = false; return; }
   try { await carregar(); } catch (e) { $("#sem-chave").hidden = false; $("#sem-chave p").textContent = e.message; return; }
   $("#app").hidden = false;
-  abrirCliente(atual);
   try { if (sessionStorage.getItem("impera-atualizado") === estado.versao) { atualizacao = { fase: "concluida" }; sessionStorage.removeItem("impera-atualizado"); } } catch (e) {}
-  desenharVersao();
+  desenharVersao();   // primeiro: mesmo que algo abaixo falhe, a área de versão (e o "Concluir atualização") aparece
+  try { abrirCliente(atual); } catch (e) { console.error(e); }
   if (!["concluida", "desatualizado"].includes(atualizacao.fase)) buscarAtualizacao(false, true);          // avisa sozinho se houver versão nova
   for (const c of estado.clientes) if (c.id !== atual) testar(c.id, true);     // acende o canhoto de todos
   setInterval(() => api("POST", "ping").catch(() => {}), 20000);                // mantém o painel no ar enquanto a janela existe

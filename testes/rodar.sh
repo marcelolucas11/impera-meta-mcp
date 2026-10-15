@@ -32,4 +32,6 @@ rodar "servidor MCP: vários clientes, isolamento de tokens, exportação" "$PY"
 rodar "protocolo MCP via stdio: chamadas simultâneas de clientes diferentes" "$PY" testes/test_stdio_multi.py "$PY" testes/wrap_server.py .
 rodar "app (painel) num navegador real" env PYTHONPATH=testes "$PY" testes/test_painel.py "$PY" . testes
 rodar "atualização: dados do usuário preservados, pacotes ruins recusados, instaladores" "$PY" testes/test_atualizacao.py .
+rodar "alterações com permissão: teto, pausado, conta padrão, histórico, sem repetição" "$PY" testes/test_escrita.py .
+rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

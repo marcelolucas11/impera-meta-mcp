@@ -14,6 +14,7 @@ API, confere Host e Origin, e nunca devolve um token para a janela.
 """
 
 import argparse
+import plistlib
 import asyncio
 import hmac
 import json
@@ -23,6 +24,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -40,6 +42,8 @@ import configurar  # noqa: E402
 import server  # noqa: E402
 
 ESTADO = BASE / ".painel.json"
+ROTULO_LAUNCHD = "local.impera.meta-mcp"
+PERMISSOES_VALIDAS = set(server.PERMISSOES)
 HTML = BASE / "painel.html"
 RECURSOS = BASE / "recursos"
 NOME_APP = "Impera Meta MCP"
@@ -105,7 +109,12 @@ def op_estado() -> dict:
             "evento_compra": v.get("META_PURCHASE_ACTION") or "auto",
             "pasta": str(_raiz_relatorios() / cid),
             "relatorios": _relatorios(cid),
+            "permissoes": server._parse_permissoes(v.get("PERMISSOES")),
+            "teto": v.get("ORCAMENTO_MAX_DIA", ""),
         } for cid, v in cs.items()],
+        "rotulos_permissoes": server.PERMISSOES,
+        "segundo_plano": segundo_plano(),
+        "segundo_plano_disponivel": sys.platform == "darwin" and bool(shutil.which("launchctl")),
         "token_antigo": bool(raiz) and raiz != configurar.PLACEHOLDER,
         "claude": _claude(),
         "versao_api": server._api_version(),
@@ -153,12 +162,15 @@ async def _testar(cid: str) -> dict:
     avisos = []
     if perms is not None and not ({"ads_read", "ads_management"} & set(perms)):
         avisos.append("O token não tem a permissão ads_read. Sem ela não há relatório.")
-    if perms and "ads_management" in perms:
-        avisos.append("O token também tem ads_management (escrita). O painel e o MCP só leem; para relatório basta ads_read.")
+    escrita = server._parse_permissoes(server._cfg("PERMISSOES"))
+    if perms is not None and escrita and "ads_management" not in perms:
+        avisos.append("Há permissões de alteração ligadas, mas o token não tem ads_management: as alterações vão falhar "
+                      "até gerar um token com essa permissão na BM.")
     if not contas:
         avisos.append("O token não enxerga nenhuma conta de anúncios. Na BM, atribua a conta ao usuário do sistema.")
     return {
         "dono": me.get("name"), "permissoes": perms, "avisos": avisos,
+        "pode_escrever": perms is None or "ads_management" in perms,
         "contas": [{
             "id": str(a.get("account_id")), "nome": a.get("name") or str(a.get("account_id")),
             "status": server._ACCOUNT_STATUS.get(a.get("account_status"), a.get("account_status")),
@@ -211,9 +223,98 @@ def op_config(cid: str, dados: dict) -> dict:
         nome = " ".join(str(dados["nome"]).split())[:60]
         if nome:
             valores["NOME"] = nome
+    if "permissoes" in dados:
+        lista = dados["permissoes"] if isinstance(dados["permissoes"], list) else []
+        if any(str(x) not in PERMISSOES_VALIDAS for x in lista):
+            raise Erro("Permissão desconhecida.")
+        valores["PERMISSOES"] = ",".join(x for x in server.PERMISSOES if x in lista)
+    if "teto" in dados:
+        bruto = str(dados["teto"] or "").strip()
+        teto = server._numero(bruto)
+        if bruto and (teto is None or teto <= 0):
+            raise Erro("Teto de orçamento inválido. Use um valor como 500 ou 1500,00, ou deixe vazio para sem teto.")
+        valores["ORCAMENTO_MAX_DIA"] = "" if teto is None else (f"{teto:.2f}".rstrip("0").rstrip("."))
     if valores:
         configurar.salvar_cliente(cid, valores)
     return {"ok": True}
+
+
+def op_historico(cid: str) -> dict:
+    _cliente_existente(cid)
+    return {"acoes": server.historico(cid, 30)}
+
+
+# ───────────────────────── segundo plano (launchd) ─────────────────────────
+
+def _plist_launchd() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{ROTULO_LAUNCHD}.plist"
+
+
+def segundo_plano() -> bool:
+    return configurar.ler_env(configurar.ENV).get("SEGUNDO_PLANO", "") == "1"
+
+
+def _launchctl(*args: str) -> bool:
+    if sys.platform != "darwin" or not shutil.which("launchctl"):
+        return False
+    return subprocess.run(["launchctl", *args], capture_output=True, timeout=20, check=False).returncode == 0
+
+
+def _escrever_plist() -> Path:
+    destino = _plist_launchd()
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    with open(destino, "wb") as f:
+        plistlib.dump({
+            "Label": ROTULO_LAUNCHD,
+            "ProgramArguments": [sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"],
+            "EnvironmentVariables": {"IMPERA_LAUNCHD": "1"},
+            "WorkingDirectory": str(BASE),
+            "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False},  # volta sozinho se cair ou depois de atualizar
+            "StandardOutPath": str(BASE / "painel.log"),
+            "StandardErrorPath": str(BASE / "painel.log"),
+            "ProcessType": "Background",
+        }, f)
+    return destino
+
+
+def op_segundo_plano(srv, ativo: bool) -> dict:
+    """Ligado: o painel roda pelo launchd (continua com o app fechado e volta ao ligar o Mac).
+    Desligado: fechar o app encerra o painel."""
+    alvo = f"gui/{os.getuid()}"
+    configurar.gravar_env(configurar.ENV, {"SEGUNDO_PLANO": "1" if ativo else "0"})
+    if ativo:
+        _escrever_plist()
+
+        def assumir():  # o processo do launchd assume a mesma porta e chave; a janela nem percebe
+            time.sleep(0.8)
+            _launchctl("bootout", f"{alvo}/{ROTULO_LAUNCHD}")  # se houver um serviço antigo carregado
+            srv.manter_estado = True
+            _launchctl("bootstrap", alvo, str(_plist_launchd()))  # o novo espera esta porta liberar
+            srv.shutdown()
+
+        if sys.platform == "darwin" and shutil.which("launchctl") and not os.environ.get("IMPERA_LAUNCHD"):
+            threading.Thread(target=assumir, daemon=True).start()
+    else:
+        try:
+            _plist_launchd().unlink()
+        except OSError:
+            pass
+        if os.environ.get("IMPERA_LAUNCHD"):
+            def sair_do_launchd():  # um processo comum assume a porta antes de o launchd encerrar este
+                time.sleep(0.8)
+                log = open(BASE / "painel.log", "a")
+                subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                 cwd=str(BASE), env={k: v for k, v in os.environ.items() if k != "IMPERA_LAUNCHD"})
+                srv.manter_estado = True
+                _launchctl("bootout", f"{alvo}/{ROTULO_LAUNCHD}")
+                srv.shutdown()
+
+            threading.Thread(target=sair_do_launchd, daemon=True).start()
+        else:
+            _launchctl("bootout", f"{alvo}/{ROTULO_LAUNCHD}")
+    return {"ok": True, "segundo_plano": ativo}
 
 
 def op_remover(cid: str) -> dict:
@@ -279,6 +380,10 @@ def op_aplicar_atualizacao(srv) -> dict:
 
     def reiniciar():
         time.sleep(0.8)  # deixa a resposta chegar na janela
+        if os.environ.get("IMPERA_LAUNCHD"):
+            srv.manter_estado, srv.codigo_saida = True, 75
+            srv.shutdown()
+            return
         log = open(BASE / "painel.log", "a")
         subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"], stdin=subprocess.DEVNULL,
                          stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
@@ -315,6 +420,7 @@ class Painel(ThreadingHTTPServer):
     daemon_threads = True
     chave = ""
     manter_estado = False  # True quando outro processo assume a mesma porta e chave (atualização)
+    codigo_saida = 0  # 75 sob o launchd = "reinicie com o código novo"
     ultimo = 0.0
     ativos = 0
     trava = threading.Lock()
@@ -414,8 +520,15 @@ class Handler(BaseHTTPRequestHandler):
             return op_buscar_atualizacao(bool(dados.get("forcar")))
         if metodo == "POST" and partes == ["atualizacao", "aplicar"]:
             return op_aplicar_atualizacao(self.server)
+        if metodo == "POST" and partes == ["segundo-plano"]:
+            return op_segundo_plano(self.server, bool(dados.get("ativo")))
         if metodo == "POST" and partes == ["encerrar"]:
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            if os.environ.get("IMPERA_LAUNCHD"):  # sob o launchd, encerrar = reiniciar com o código instalado
+                self.server.manter_estado, self.server.codigo_saida = True, 75
+            def encerrar(srv=self.server):
+                time.sleep(0.3)  # deixa a resposta chegar antes de fechar
+                srv.shutdown()
+            threading.Thread(target=encerrar, daemon=True).start()
             return {"ok": True}
         if len(partes) >= 2 and partes[0] == "clientes":
             cid = partes[1]
@@ -432,6 +545,8 @@ class Handler(BaseHTTPRequestHandler):
                     return op_config(cid, dados)
                 if acao == "exportar":
                     return op_exportar(cid, dados)
+                if acao == "historico":
+                    return op_historico(cid)
         raise Erro("Rota desconhecida.", 404)
 
     def do_GET(self):
@@ -476,13 +591,18 @@ def servir(porta: int = 0, ocioso: int = OCIOSO_S, reaproveitar: bool = False) -
     _gravar_estado(srv.server_address[1], srv.chave)
 
     def vigia():
+        proxima_busca = time.time() + 120
         while True:
             time.sleep(5)
+            fundo = segundo_plano() or bool(os.environ.get("IMPERA_LAUNCHD"))
             with srv.trava:
-                parado = srv.ativos == 0 and time.time() - srv.ultimo > ocioso
+                parado = srv.ativos == 0 and not fundo and time.time() - srv.ultimo > ocioso
             if parado:
                 srv.shutdown()
                 return
+            if fundo and time.time() > proxima_busca:  # em segundo plano, avisa quando sair versão nova
+                proxima_busca = time.time() + 6 * 3600
+                _avisar_versao_nova()
 
     threading.Thread(target=vigia, daemon=True).start()
     try:
@@ -495,6 +615,23 @@ def servir(porta: int = 0, ocioso: int = OCIOSO_S, reaproveitar: bool = False) -
                 ESTADO.unlink()
         except (OSError, ValueError):
             pass
+    if srv.codigo_saida:
+        sys.exit(srv.codigo_saida)
+
+
+def _avisar_versao_nova() -> None:
+    try:
+        info = atualizar.buscar()
+    except atualizar.ErroAtualizacao:
+        return
+    marca = BASE / ".aviso-versao"
+    if not info.get("disponivel") or (marca.exists() and marca.read_text().strip() == info["nova"]):
+        return
+    marca.write_text(info["nova"])
+    if sys.platform == "darwin":
+        texto = f"Versão {info['nova']} disponível. Abra o app e clique em Atualizar agora."
+        subprocess.run(["osascript", "-e", f'display notification "{texto}" with title "{NOME_APP}"'],
+                       capture_output=True, timeout=10, check=False)
 
 
 # ───────────────────────── abrir / instalar ─────────────────────────
@@ -532,12 +669,14 @@ def encerrar_servidor() -> bool:
         urllib.request.urlopen(req, timeout=5).close()
     except (OSError, ValueError, urllib.error.URLError):
         pass
-    for _ in range(40):  # espera liberar a porta
+    for _ in range(40):  # espera o processo antigo sair (sob o launchd, outro assume no lugar)
         time.sleep(0.25)
-        if not _no_ar():
+        agora = _no_ar()
+        if not agora or agora.get("pid") != est.get("pid"):
             break
     try:  # versões antigas podem deixar o arquivo de estado para trás
-        if json.loads(ESTADO.read_text()).get("porta") == est.get("porta"):
+        atual = json.loads(ESTADO.read_text())
+        if atual.get("pid") == est.get("pid") and not _no_ar():
             ESTADO.unlink()
     except (OSError, ValueError):
         pass
@@ -552,6 +691,13 @@ def garantir_servidor() -> dict:
         # O programa foi atualizado no disco, mas o painel em execução ainda é o código antigo:
         # encerra e sobe de novo, senão a janela nova conversa com o servidor velho.
         encerrar_servidor()
+        for _ in range(20):  # sob o launchd, o painel novo volta sozinho
+            est = _no_ar()
+            if est and _versao_no_ar(est) == atualizar.versao_local():
+                return est
+            if not est:
+                break
+            time.sleep(0.25)
     log = open(BASE / "painel.log", "a")
     subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir"], stdin=subprocess.DEVNULL,
                      stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
@@ -576,50 +722,137 @@ def abrir_janela(url: str) -> None:
         webbrowser.open(url)
 
 
+def _pasta_aplicativos() -> Path:
+    # Pasta Aplicativos do Mac quando dá para gravar nela (aparece no Finder e no Launchpad);
+    # senão, a pasta Aplicativos do usuário.
+    if os.access("/Applications", os.W_OK) and not os.environ.get("PAINEL_FORCAR_APP"):
+        return Path("/Applications")
+    return Path.home() / "Applications"
+
+
+def caminho_app() -> Path:
+    return _pasta_aplicativos() / f"{NOME_APP}.app"
+
+
+def _e_nosso(app: Path) -> bool:
+    """Só apaga um .app se for mesmo deste programa."""
+    try:
+        if "painel.py" in (app / "Contents" / "MacOS" / "abrir").read_text(encoding="utf-8"):
+            return True
+    except OSError:
+        pass
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as f:
+            return plistlib.load(f).get("CFBundleIdentifier") == "local.impera.meta-mcp"
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return False
+
+
+def _script_do_app() -> str:
+    def literal(caminho) -> str:  # dentro de uma string AppleScript
+        return str(caminho).replace("\\", "\\\\").replace('"', '\\"')
+    modelo = (RECURSOS / "app.applescript").read_text(encoding="utf-8")
+    return modelo.replace("__PYTHON__", literal(sys.executable)).replace("__PAINEL__", literal(BASE / "painel.py"))
+
+
+def _ajustar_bundle(app: Path, executavel: Optional[str], icone: str) -> None:
+    info_path = app / "Contents" / "Info.plist"
+    try:
+        with open(info_path, "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        info = {}
+    versao = atualizar.versao_local()
+    info.update({
+        "CFBundleName": NOME_APP, "CFBundleDisplayName": NOME_APP, "CFBundleIdentifier": "local.impera.meta-mcp",
+        "CFBundlePackageType": "APPL", "CFBundleShortVersionString": versao, "CFBundleVersion": versao,
+        "CFBundleIconFile": icone, "LSMinimumSystemVersion": "11.0", "NSHighResolutionCapable": True,
+        # a janela carrega o painel em http://127.0.0.1
+        "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
+    })
+    if executavel:
+        info["CFBundleExecutable"] = executavel
+    info.pop("LSUIElement", None)  # aparece no Dock, com o ponto de "aberto"
+    with open(info_path, "wb") as f:
+        plistlib.dump(info, f)
+
+
+def _criar_applet(destino: Path) -> bool:
+    """App de verdade, feito pelo osacompile do próprio Mac: ícone no Dock com o ponto de aberto,
+    uma janela só (clicar de novo só traz a janela para a frente) e fechar = sair."""
+    if sys.platform != "darwin" or not shutil.which("osacompile"):
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        fonte = Path(tmp) / "app.applescript"
+        fonte.write_text(_script_do_app(), encoding="utf-8")
+        montado = Path(tmp) / f"{NOME_APP}.app"
+        r = subprocess.run(["osacompile", "-s", "-o", str(montado), str(fonte)], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or not montado.is_dir():
+            print(f"osacompile falhou: {(r.stderr or r.stdout).strip()[:300]}", file=sys.stderr)
+            return False
+        recursos = montado / "Contents" / "Resources"
+        if (RECURSOS / "icone.icns").exists():
+            for nome in ("applet.icns", "icone.icns"):
+                shutil.copyfile(RECURSOS / "icone.icns", recursos / nome)
+        _ajustar_bundle(montado, None, "applet")
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(montado)], capture_output=True, timeout=120, check=False)
+        if destino.exists():
+            shutil.rmtree(destino)
+        shutil.move(str(montado), str(destino))
+    return True
+
+
+def _criar_lancador(app: Path) -> None:
+    """Plano B (sem osacompile): ícone que abre o painel numa janela do navegador."""
+    macos, res = app / "Contents" / "MacOS", app / "Contents" / "Resources"
+    macos.mkdir(parents=True, exist_ok=True)
+    res.mkdir(parents=True, exist_ok=True)
+    lancador = macos / "abrir"
+    lancador.write_text(f'#!/bin/bash\nexec "{sys.executable}" "{BASE / "painel.py"}" --abrir-navegador >> "{BASE / "painel.log"}" 2>&1\n',
+                        encoding="utf-8")
+    lancador.chmod(0o755)
+    if (RECURSOS / "icone.icns").exists():
+        shutil.copyfile(RECURSOS / "icone.icns", res / "icone.icns")
+    _ajustar_bundle(app, "abrir", "icone")
+    with open(app / "Contents" / "Info.plist", "rb") as f:
+        info = plistlib.load(f)
+    info["LSUIElement"] = True  # o lançador só abre o navegador e sai
+    with open(app / "Contents" / "Info.plist", "wb") as f:
+        plistlib.dump(info, f)
+
+
 def criar_app() -> Optional[Path]:
     """Monta o .app neste computador. Por ser criado aqui (e não baixado), o macOS o abre
     sem o aviso de desenvolvedor não identificado."""
     if sys.platform != "darwin" and not os.environ.get("PAINEL_FORCAR_APP"):
         return None
-    # Pasta Aplicativos do Mac quando dá para gravar nela (aparece no Finder e no Launchpad);
-    # senão, a pasta Aplicativos do usuário.
-    pasta = Path("/Applications") if os.access("/Applications", os.W_OK) and not os.environ.get("PAINEL_FORCAR_APP") else Path.home() / "Applications"
-    app = pasta / f"{NOME_APP}.app"
-    # Remove o app com o nome antigo, só se for mesmo o nosso (o lançador aponta para este painel).
+    app = caminho_app()
+    # Remove o app com o nome antigo, só se for mesmo o nosso.
     for antigo in NOMES_ANTIGOS:
         for base in (Path("/Applications"), Path.home() / "Applications"):
             velho = base / f"{antigo}.app"
-            try:
-                if "painel.py" in (velho / "Contents" / "MacOS" / "abrir").read_text(encoding="utf-8"):
-                    shutil.rmtree(velho)
-            except OSError:
-                pass
-    macos, res = app / "Contents" / "MacOS", app / "Contents" / "Resources"
-    macos.mkdir(parents=True, exist_ok=True)
-    res.mkdir(parents=True, exist_ok=True)
-    (app / "Contents" / "Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>{NOME_APP}</string>
-  <key>CFBundleDisplayName</key><string>{NOME_APP}</string>
-  <key>CFBundleIdentifier</key><string>local.impera.meta-mcp</string>
-  <key>CFBundleExecutable</key><string>abrir</string>
-  <key>CFBundleIconFile</key><string>icone</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>{atualizar.versao_local()}</string>
-  <key>CFBundleVersion</key><string>{atualizar.versao_local()}</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>LSUIElement</key><true/>
-</dict></plist>
-""", encoding="utf-8")
-    lancador = macos / "abrir"
-    lancador.write_text(f'#!/bin/bash\nexec "{sys.executable}" "{BASE / "painel.py"}" --abrir >> "{BASE / "painel.log"}" 2>&1\n',
-                        encoding="utf-8")
-    lancador.chmod(0o755)
-    if (RECURSOS / "icone.icns").exists():
-        shutil.copyfile(RECURSOS / "icone.icns", res / "icone.icns")
+            if velho.exists() and _e_nosso(velho):
+                shutil.rmtree(velho, ignore_errors=True)
+    app.parent.mkdir(parents=True, exist_ok=True)
+    if app.exists() and not _e_nosso(app):
+        raise SystemExit(f"Já existe um {app} que não é deste programa; não vou sobrescrever.")
+    if not _criar_applet(app):
+        if app.exists():
+            shutil.rmtree(app)
+        _criar_lancador(app)
     os.utime(app, None)  # faz o Finder reler o ícone
+    lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    if os.path.exists(lsregister):
+        subprocess.run([lsregister, "-f", str(app)], capture_output=True, timeout=60, check=False)
     return app
+
+
+def abrir_app() -> bool:
+    """Abre (ou traz para a frente) o app. O macOS garante uma instância só."""
+    app = caminho_app()
+    if sys.platform == "darwin" and app.exists():
+        return subprocess.run(["open", "-a", str(app)], check=False).returncode == 0
+    return False
 
 
 def main() -> None:
@@ -633,7 +866,26 @@ def main() -> None:
     ap.add_argument("--reaproveitar", action="store_true")
     ap.add_argument("--encerrar", action="store_true")
     ap.add_argument("--pos-atualizacao", action="store_true")
+    ap.add_argument("--url", action="store_true", help="garante o painel no ar e imprime o endereço (usado pelo app)")
+    ap.add_argument("--abrir-navegador", action="store_true")
+    ap.add_argument("--ao-fechar-app", action="store_true")
+    ap.add_argument("--motivo", default="")
     a = ap.parse_args()
+
+    if a.url:
+        est = garantir_servidor()
+        print(f"http://127.0.0.1:{est['porta']}/#k={est['chave']}")
+        return
+    if a.abrir_navegador:
+        if a.motivo:
+            print(f"Janela própria indisponível ({a.motivo[:200]}); abrindo no navegador.", file=sys.stderr)
+        est = garantir_servidor()
+        abrir_janela(f"http://127.0.0.1:{est['porta']}/#k={est['chave']}")
+        return
+    if a.ao_fechar_app:
+        if not segundo_plano():
+            encerrar_servidor()
+        return
 
     if a.servir:
         servir(a.porta, a.ocioso, a.reaproveitar)
@@ -652,6 +904,10 @@ def main() -> None:
         r = op_registrar_claude()
         print("Claude Desktop: " + {"ok": "servidor 'meta-ads' registrado. Feche o Claude (Cmd+Q) e abra de novo.",
                                      "igual": "servidor 'meta-ads' já estava registrado."}.get(r["status"], "não registrado (" + r["status"] + "); use o botão no painel."))
+    if not (a.sem_janela or os.environ.get("PAINEL_SEM_JANELA")) and abrir_app():
+        if a.instalar_app:
+            print(f"App aberto. Da próxima vez, abra o \"{NOME_APP}\" pelo Dock, pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos.")
+        return
     est = garantir_servidor()
     url = f"http://127.0.0.1:{est['porta']}/#k={est['chave']}"
     if a.sem_janela or os.environ.get("PAINEL_SEM_JANELA"):

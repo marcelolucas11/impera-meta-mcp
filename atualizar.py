@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Atualização do Impera Meta MCP pelas releases do GitHub.
 
-Só substitui arquivos do programa. Nunca toca no que é do usuário: clientes e
-tokens (clientes/), ajustes (.env), relatórios, o ambiente Python (.venv) e o
-estado do app. Antes de copiar, guarda a versão atual em .versoes-anteriores/.
+Só substitui arquivos do programa. Nunca toca no que é do usuário: clientes,
+tokens e permissões (clientes/), ajustes (.env), relatórios, histórico de
+alterações, o ambiente Python (.venv) e o estado do app. Antes de copiar, guarda a versão atual em .versoes-anteriores/.
 
   atualizar.py --verificar   mostra se há versão nova
   atualizar.py --aplicar     baixa, confere e instala a versão nova
@@ -30,8 +30,8 @@ PACOTE = "impera-meta-mcp.zip"
 PAGINA_RELEASES = f"https://github.com/{REPO}/releases"
 
 # Itens da raiz que pertencem ao usuário e nunca são escritos por uma atualização.
-PRESERVAR = {".env", "clientes", "relatorios", ".venv", ".painel.json", "painel.log",
-             ".versoes-anteriores", ".git"}
+PRESERVAR = {".env", "clientes", "relatorios", "historico", ".venv", ".painel.json", "painel.log",
+             ".aviso-versao", ".versoes-anteriores", ".git"}
 LIMITE_BYTES = 60 * 1024 * 1024
 
 

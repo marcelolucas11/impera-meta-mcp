@@ -14,15 +14,23 @@ Repositório do app Impera Meta MCP (Mac) e do servidor MCP `meta-ads`. O dono �
 
 ## Atualização sem perda de dados
 
-- `atualizar.py` e `instalar.sh` só escrevem arquivos do programa. Nunca tocam em `clientes/`, `.env`, `relatorios/`, `.venv/`, `.painel.json`, `painel.log`, `.versoes-anteriores/`.
+- `atualizar.py` e `instalar.sh` só escrevem arquivos do programa. Nunca tocam em `clientes/`, `historico/`, `.env`, `relatorios/`, `.venv/`, `.painel.json`, `painel.log`, `.aviso-versao`, `.versoes-anteriores/`.
 - Qualquer arquivo novo de dados do usuário precisa entrar nessas duas listas de preservação (e no `.gitignore`) antes de existir.
 - O nome do pacote (`impera-meta-mcp.zip`) e a pasta raiz dele (`impera-meta-mcp/`) não mudam: o app instalado e o botão de download do README dependem deles.
 
 ## Regras que não mudam
 
-- Somente leitura: o servidor só faz GET na Graph API. Nada que crie, edite, pause ou apague.
+- Leitura sempre. Escrita só pelas ferramentas de alteração e só quando o cliente tem a permissão ligada no app (`PERMISSOES` no `clientes/<id>.env`: status, orcamento, editar, criar). Sempre só na conta padrão do cliente, tudo criado PAUSADO, respeitando `ORCAMENTO_MAX_DIA`, com registro em `historico/<id>.jsonl`. Nenhuma ferramenta apaga nada.
+- POST na Graph API nunca é repetido às cegas: só quando a Meta recusou antes de processar (limite de chamadas, falha de conexão). Em falha ambígua, avisar que pode ter sido aplicada.
 - Token só no cabeçalho `Authorization`, nunca em URL, log, resposta de ferramenta ou na janela do app. Nunca pedir token no chat.
 - Um token por cliente (`clientes/<id>.env`, permissão 600). Com mais de um cliente, `cliente` é obrigatório: nunca escolher por omissão.
 - Nenhum token, `.env`, `clientes/` ou `relatorios/` no repositório.
 - O nome do servidor no Claude Desktop é `meta-ads` e a pasta instalada é `~/meta-ads-mcp`. Mudar qualquer um quebra instalações e instruções de projeto já existentes.
 - Alcance e frequência são deduplicados: nunca somar entre linhas.
+
+## App do Mac
+
+- `painel.py --instalar-app` / `--pos-atualizacao` monta o `.app` com `osacompile` a partir de `recursos/app.applescript` (janela WKWebView própria, ponto no Dock, `on reopen` traz a janela, fechar = sair). Sem `osacompile`, cai no lançador que abre o navegador.
+- Segundo plano = LaunchAgent `local.impera.meta-mcp` (`~/Library/LaunchAgents`), com `--servir --reaproveitar`. Sob o launchd (`IMPERA_LAUNCHD=1`), encerrar/atualizar sai com código 75 para o launchd subir o código novo na mesma porta e chave.
+- A ponte do Claude com a Meta é o `server.py`, que o Claude Desktop sobe sozinho; não depende do app estar aberto.
+

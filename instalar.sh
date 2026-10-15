@@ -14,7 +14,7 @@ if [ "$ORIGEM" != "$(cd "$DESTINO" 2>/dev/null && pwd -P)" ]; then
     nome="$(basename "$item")"
     case "$nome" in
       # O que é do usuário (ou não faz parte do programa) nunca é copiado por cima.
-      .env|clientes|relatorios|.venv|.painel.json|painel.log|.versoes-anteriores|.git|.github|testes|__pycache__) continue ;;
+      .env|clientes|relatorios|historico|.venv|.painel.json|painel.log|.aviso-versao|.versoes-anteriores|.git|.github|testes|__pycache__) continue ;;
     esac
     cp -R "$item" "$DESTINO/"
   done

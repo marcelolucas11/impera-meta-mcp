@@ -13,6 +13,9 @@ send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}); tools = recv()["result"]["tools"]
 print("ferramentas:", [t["name"] for t in tools])
 assert all("cliente" in t["inputSchema"].get("properties", {}) for t in tools if t["name"] != "listar_clientes")
+escrita = {t["name"]: t.get("annotations") or {} for t in tools if t["name"] in ("alterar_status", "alterar_orcamento", "renomear", "duplicar", "criar_campanha", "criar_conjunto", "criar_anuncio")}
+assert len(escrita) == 7 and all(a.get("readOnlyHint") is False for a in escrita.values()), escrita
+print("ferramentas de alteração marcadas como não somente leitura:", sorted(escrita))
 # 6 chamadas disparadas de uma vez, alternando clientes
 for i in range(6):
     send({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {"cliente": "primos" if i % 2 == 0 else "donaco", "desde": "2026-09-01", "ate": "2026-09-02"}}})
@@ -25,4 +28,4 @@ for _ in range(6):
 print("respostas na ordem de chegada:", " ".join(ordem))
 send({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {}}})
 print("sem cliente ->", recv()["result"]["content"][0]["text"][:95])
-p.terminate(); assert ok and len(tools) == 6; print("OK")
+p.terminate(); assert ok and len(tools) == 17, len(tools); print("OK")

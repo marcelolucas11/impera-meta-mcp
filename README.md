@@ -48,14 +48,18 @@ Instalar por cima com o botão de download ou com a linha do Terminal também pr
 | Novo cliente | Nome e token. O app testa na hora e lista as contas que o token enxerga. |
 | Últimos 7 dias | Investido, compras, ROAS e custo por compra da conta padrão. |
 | Conexão | Trocar token, escolher a conta padrão, definir o evento de compra. |
+| O que o Claude pode fazer | Liga e desliga, por cliente: ativar e pausar, orçamentos e lances, renomear, criar e duplicar. Mais o teto de orçamento diário. |
+| Alterações feitas pelo Claude | O registro de cada alteração: quando, o quê, valores antes e depois, e se foi aplicada. |
 | Relatórios | Escolher o período e exportar o `.xlsx`; abrir o arquivo ou mostrá-lo no Finder. |
 | No projeto do Claude | A instrução pronta para colar no projeto daquele cliente. |
-| Rodapé da coluna | Se o Claude Desktop já está ligado ao servidor, com botão para ligar. |
+| Rodapé da coluna | Ligação com o Claude Desktop, **Manter em segundo plano**, versão e **Buscar atualização**. |
 
-- O app abre numa janela do Chrome (ou Edge/Brave) sem barra de endereço. Sem nenhum deles, abre no navegador padrão.
+- **Dock**: o app tem janela própria e mostra o ponto de "aberto" embaixo do ícone. Clicar no ícone com o app aberto só traz a janela para a frente. Fechar a janela fecha o app e o ponto some.
+- **Manter em segundo plano**: ligado, o painel continua ativo com o app fechado, volta sozinho ao ligar o Mac e avisa quando sair versão nova. Desligado, fechar o app encerra tudo.
+- A conexão do Claude com a Meta não depende do app: o Claude Desktop sobe o servidor sozinho, com o app aberto ou fechado.
 - O token é digitado no app e nunca volta a aparecer: nem na janela, nem em log.
-- O painel só atende este Mac (127.0.0.1), exige uma chave aleatória por sessão e se encerra sozinho alguns minutos depois de a janela ser fechada.
-- Cliente novo ou token trocado vale na hora para o Claude, sem reiniciar.
+- O painel só atende este Mac (127.0.0.1) e exige uma chave aleatória por sessão.
+- Cliente novo, token trocado ou permissão alterada vale na hora para o Claude, sem reiniciar.
 
 ## Um projeto do Claude por cliente
 
@@ -75,20 +79,35 @@ Assim, "exporta o relatório dos últimos 7 dias" dentro do projeto PRIMOS puxa 
 ## O token de cada cliente
 
 - Gerado na BM do cliente: Configurações do negócio > Usuários > Usuários do sistema > Gerar token.
-- Só a permissão `ads_read`. Assim o próprio token não consegue alterar campanhas.
+- Para só ler, basta a permissão `ads_read`. Para o Claude alterar campanhas, o token precisa também de `ads_management`, e o usuário do sistema precisa de acesso de anunciante à conta.
 - A conta de anúncios precisa estar atribuída ao usuário do sistema (Atribuir ativos).
 - A pasta `clientes/` está no `.gitignore`. Não suba para o GitHub e não cole tokens em chat.
 
 ## Ferramentas que o Claude ganha
 
+Leitura (sempre disponível):
+
 | Ferramenta | O que faz |
 |---|---|
-| `listar_clientes` | Clientes configurados, conta padrão e pasta de relatórios. Nunca mostra tokens. |
+| `listar_clientes` | Clientes configurados, conta padrão, permissões e pasta de relatórios. Nunca mostra tokens. |
 | `verificar_conexao` | Testa o token de um cliente, ou de todos. |
 | `listar_contas` | Contas de anúncios que o token do cliente enxerga. |
 | `estrutura_conta` | Orçamento, estratégia de lance, limite de CPA, ROAS mínimo e público de cada campanha/conjunto. |
 | `consultar_insights` | Métricas por conta, campanha, conjunto ou anúncio; por dia ou no período; com quebra por idade/gênero, plataforma, posicionamento, dispositivo, região ou hora. |
 | `exportar_relatorio` | Gera o `.xlsx` com as Tabelas A, B e C do prompt v4, conta por dia e estrutura. |
+| `listar_pixels`, `listar_paginas`, `listar_midias`, `buscar_localizacao` | Pixels, páginas e Instagram, imagens e vídeos da conta, e chaves de cidades/estados para segmentação. |
+
+Alteração (só com a permissão ligada no app para aquele cliente):
+
+| Ferramenta | Permissão | O que faz |
+|---|---|---|
+| `alterar_status` | Ativar e pausar | Ativa ou pausa campanhas, conjuntos e anúncios. |
+| `alterar_orcamento` | Orçamentos e lances | Orçamento diário/total, limite de CPA e ROAS mínimo, dentro do teto. |
+| `renomear` | Renomear | Muda o nome de campanha, conjunto ou anúncio. |
+| `duplicar` | Criar e duplicar | Copia campanha (com conjuntos e anúncios), conjunto (com anúncios) ou anúncio. Cópias pausadas. |
+| `criar_campanha` | Criar e duplicar | Campanha pausada, com orçamento na campanha ou nos conjuntos. |
+| `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
+| `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 
 ## O arquivo exportado
 
@@ -107,8 +126,11 @@ Assim, "exporta o relatório dos últimos 7 dias" dentro do projeto PRIMOS puxa 
 
 ## Segurança
 
-- O servidor MCP e o app só fazem requisições GET à Meta. Não há código que crie, edite, pause ou apague nada.
-- O token vai no cabeçalho `Authorization`, nunca em URL, log ou resposta.
+- Leitura sempre; alteração só com a permissão do cliente ligada no app, só na conta padrão dele, e o Claude Desktop pede confirmação a cada uma.
+- Tudo que é criado ou duplicado nasce pausado. Ativar é uma ação separada, que exige a permissão "Ativar e pausar".
+- Orçamentos acima do teto do cliente são recusados antes de chegar à Meta. Nenhuma ferramenta apaga nada.
+- Uma alteração nunca é reenviada às cegas: se a conexão cair no meio, o Claude avisa que ela pode ter sido aplicada, em vez de repetir.
+- O token vai no cabeçalho `Authorization`, nunca em URL, log, histórico ou resposta.
 
 ## Se algo falhar
 
