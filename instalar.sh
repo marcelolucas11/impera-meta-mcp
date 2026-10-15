@@ -56,5 +56,7 @@ echo "Instalando dependências..."
 .venv/bin/python -m pip install -q --disable-pip-version-check -r requirements.txt
 
 echo "Versão instalada: $(cat VERSAO 2>/dev/null || echo '?')"
+# Se o app estiver aberto com a versão anterior, fecha o painel para ele voltar com o código novo.
+.venv/bin/python painel.py --encerrar || true
 # Cria o app, liga ao Claude Desktop e abre o painel. Daqui em diante, tudo é feito na janela do app.
 .venv/bin/python painel.py --instalar-app

@@ -181,6 +181,7 @@ function dia(base, deslocamento) { const d = new Date(base + "T12:00:00"); d.set
 
 async function carregar() {
   estado = await api("GET", "estado");
+  if (!estado.versao) atualizacao = { fase: "desatualizado" };   // janela nova falando com um painel de versão anterior
   if (atual !== "novo" && !cliente(atual)) atual = estado.clientes.length ? estado.clientes[0].id : "novo";
 }
 
@@ -342,12 +343,15 @@ function desenharVersao() {
       <p>Clientes, tokens e relatórios ficam como estão.</p>
       <button class="btn principal" type="button" id="btn-atualizar">Atualizar agora</button>`;
   else if (a.fase === "ok") corpo = `<p>${esc(a.dados.mensagem || "Você já está na versão mais nova.")}</p>`;
+  else if (a.fase === "desatualizado") corpo = `<p class="falha">O app foi atualizado, mas o painel aberto ainda é o da versão anterior.</p>
+      <button class="btn principal" type="button" id="btn-reiniciar-painel">Concluir atualização</button>`;
+  else if (a.fase === "reinicie") corpo = `<p class="nova">Pronto. Feche esta janela e abra o Impera Meta MCP de novo.</p>`;
   else if (a.fase === "aplicando") corpo = `<p>Baixando e instalando a versão ${esc(a.nova)}. Não feche esta janela.</p>`;
   else if (a.fase === "reiniciando") corpo = `<p>Atualizado para ${esc(a.para)}. Reabrindo o app…</p>`;
   else if (a.fase === "concluida") corpo = `<p class="nova">Atualizado para a versão ${esc(estado.versao)}.</p>
       <p>Para o Claude usar a versão nova, feche o Claude (Cmd+Q) e abra de novo.</p>`;
   $("#versao").innerHTML = `<div class="topo-versao"><span>Versão ${esc(estado.versao || "–")}</span>
-    ${ocupado ? "" : `<button class="btn leve" type="button" id="btn-buscar-atualizacao">Buscar atualização</button>`}</div>${corpo}`;
+    ${ocupado || ["desatualizado", "reinicie"].includes(a.fase) ? "" : `<button class="btn leve" type="button" id="btn-buscar-atualizacao">Buscar atualização</button>`}</div>${corpo}`;
 }
 
 async function buscarAtualizacao(forcar, silencioso) {
@@ -432,6 +436,7 @@ document.addEventListener("click", async (ev) => {
     if (b.id === "btn-novo") return abrirCliente("novo");
     if (b.id === "btn-buscar-atualizacao") return buscarAtualizacao(true, false);
     if (b.id === "btn-atualizar") return aplicarAtualizacao();
+    if (b.id === "btn-reiniciar-painel") { await api("POST", "encerrar").catch(() => {}); atualizacao = { fase: "reinicie" }; return desenharVersao(); }
     if (b.id === "btn-testar") return testar(atual);
     if (b.id === "btn-resumo") return puxarResumo(atual);
     if (b.id === "btn-exportar") return exportar();
@@ -512,7 +517,7 @@ document.addEventListener("submit", async (ev) => {
   abrirCliente(atual);
   try { if (sessionStorage.getItem("impera-atualizado") === estado.versao) { atualizacao = { fase: "concluida" }; sessionStorage.removeItem("impera-atualizado"); } } catch (e) {}
   desenharVersao();
-  if (atualizacao.fase !== "concluida") buscarAtualizacao(false, true);          // avisa sozinho se houver versão nova
+  if (!["concluida", "desatualizado"].includes(atualizacao.fase)) buscarAtualizacao(false, true);          // avisa sozinho se houver versão nova
   for (const c of estado.clientes) if (c.id !== atual) testar(c.id, true);     // acende o canhoto de todos
   setInterval(() => api("POST", "ping").catch(() => {}), 20000);                // mantém o painel no ar enquanto a janela existe
 })();

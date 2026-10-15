@@ -214,6 +214,82 @@ for est_path in (inst3 / ".painel.json",):
     except Exception:
         pass
 
+# ── 4. painel da versão anterior ainda aberto quando os arquivos novos chegam (o caso do "Rota desconhecida") ──
+def painel_antigo_no_ar(inst: Path) -> dict:
+    """Sobe o painel da 4.0 (sem rota de atualização), como estava no Mac antes de instalar por cima."""
+    for arq in ("painel.py", "server.py", "configurar.py", "painel.html"):
+        conteudo = subprocess.run(["git", "-C", str(REPO), "show", f"b82ad6d:{arq}"], capture_output=True, check=True).stdout
+        (inst / arq).write_bytes(conteudo)
+    (inst / "VERSAO").unlink(missing_ok=True)
+    (inst / "atualizar.py").unlink(missing_ok=True)
+    p = subprocess.Popen([PY, str(inst / "painel.py"), "--servir"], cwd=str(inst), stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(60):
+        if (inst / ".painel.json").exists(): break
+        time.sleep(0.2)
+    return dict(json.loads((inst / ".painel.json").read_text()), proc=p)
+
+
+def no_ar(est) -> dict:
+    req = urllib.request.Request(f"http://127.0.0.1:{est['porta']}/api/estado", headers={"X-Painel-Chave": est["chave"]})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def encerrar(inst: Path):
+    try:
+        e = json.loads((inst / ".painel.json").read_text())
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{e['porta']}/api/encerrar", data=b"{}", method="POST",
+                                                      headers={"X-Painel-Chave": e["chave"]}), timeout=5)
+    except Exception:
+        pass
+
+
+versao_repo = (REPO / "VERSAO").read_text().strip()
+base4 = Path(tempfile.mkdtemp()); inst4 = instalacao_com_dados(base4)
+(inst4 / ".venv").symlink_to(REPO / ".venv")
+velho = painel_antigo_no_ar(inst4)
+check("cenário: painel 4.0 no ar, sem versão e sem rota de atualização", "versao" not in no_ar(velho))
+# 4a. instalar por cima com o app aberto
+z = pacote(versao_repo); publicar(z, versao_repo)
+r = subprocess.run(["bash", str(REPO / "instalar-mac.sh")], env=dict(os.environ, HOME=str(base4), PAINEL_SEM_JANELA="1",
+                   IMPERA_URL_PACOTE=URL + "/pkg/impera-meta-mcp.zip"), capture_output=True, text=True, timeout=600)
+velho["proc"].wait(timeout=20) if velho["proc"].poll() is None else None
+novo = json.loads((inst4 / ".painel.json").read_text())
+check("instalar por cima fecha o painel antigo", velho["proc"].poll() is not None, (r.stdout + r.stderr).strip().splitlines()[-1][:100])
+check("o painel que ficou no ar é o da versão nova", no_ar(novo).get("versao") == versao_repo, str(no_ar(novo).get("versao")))
+st = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{novo['porta']}/api/atualizacao/buscar", data=b"{}", method="POST",
+                            headers={"X-Painel-Chave": novo["chave"], "Content-Type": "application/json"}), timeout=10).status
+check("Buscar atualização responde (sem 'Rota desconhecida')", st == 200)
+check("dados do usuário intactos", (inst4 / "clientes/primos.env").read_text().count(TOKEN) == 1)
+encerrar(inst4); time.sleep(1)
+# 4b. arquivos novos no disco com o painel antigo ainda aberto: abrir o app troca o painel
+velho = painel_antigo_no_ar(inst4)
+for arq in ("painel.py", "server.py", "configurar.py", "painel.html", "atualizar.py", "VERSAO"):
+    shutil.copy2(REPO / arq, inst4 / arq)
+r = subprocess.run([PY, str(inst4 / "painel.py"), "--abrir", "--sem-janela"], cwd=str(inst4), capture_output=True, text=True,
+                   timeout=60, env=dict(os.environ, HOME=str(base4)))
+novo = json.loads((inst4 / ".painel.json").read_text())
+check("abrir o app com painel antigo no ar: sobe o painel da versão instalada", velho["proc"].wait(timeout=20) is not None
+      and no_ar(novo).get("versao") == versao_repo, r.stdout.strip()[:80])
+r2 = subprocess.run([PY, str(inst4 / "painel.py"), "--abrir", "--sem-janela"], cwd=str(inst4), capture_output=True, text=True, timeout=60)
+check("abrir de novo, já na versão certa: reaproveita o mesmo painel", json.loads((inst4 / ".painel.json").read_text())["pid"] == novo["pid"])
+encerrar(inst4); time.sleep(1)
+# 4c. janela aberta numa versão nova falando com o painel antigo: oferece concluir a atualização
+velho = painel_antigo_no_ar(inst4)
+shutil.copy2(REPO / "painel.html", inst4 / "painel.html")
+with sync_playwright() as p:
+    b = p.chromium.launch(executable_path=os.environ.get("CHROMIUM_PATH") or None)
+    pg = b.new_page(viewport={"width": 1180, "height": 840})
+    pg.goto(f"http://127.0.0.1:{velho['porta']}/#k={velho['chave']}")
+    expect(pg.locator("#versao")).to_contain_text("ainda é o da versão anterior", timeout=15000)
+    check("janela nova com painel antigo: explica e oferece concluir", pg.locator("#btn-reiniciar-painel").is_visible())
+    pg.click("#btn-reiniciar-painel")
+    expect(pg.locator("#versao")).to_contain_text("Feche esta janela e abra o Impera Meta MCP de novo")
+    check("Concluir atualização encerra o painel antigo", velho["proc"].wait(timeout=20) is not None)
+    b.close()
+encerrar(inst4)
+
 gh.shutdown()
 print(f"\n{sum(ok)}/{len(ok)} verificações passaram")
 sys.exit(0 if all(ok) else 1)

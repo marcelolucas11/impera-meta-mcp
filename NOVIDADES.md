@@ -1,5 +1,10 @@
 # Novidades
 
+## 4.1.2
+
+- Corrige o "Rota desconhecida" ao buscar atualização logo depois de instalar por cima com o app aberto: o painel antigo continuava rodando. Agora o instalador fecha o painel antigo, e abrir o app sempre sobe o painel da versão instalada.
+- Se a janela encontrar um painel de versão anterior, mostra o botão "Concluir atualização".
+
 ## 4.1.1
 
 - Ao atualizar pelo app, os instaladores continuam executáveis (antes perdiam a permissão de execução).

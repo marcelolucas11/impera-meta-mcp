@@ -510,10 +510,48 @@ def _no_ar() -> Optional[dict]:
         return None
 
 
+def _versao_no_ar(est: dict) -> Optional[str]:
+    """Versão do painel que está rodando (a 4.0 não informava: vira None)."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{int(est['porta'])}/api/estado",
+                                     headers={"X-Painel-Chave": est["chave"]})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read().decode("utf-8")).get("versao")
+    except (OSError, ValueError, KeyError, urllib.error.URLError):
+        return None
+
+
+def encerrar_servidor() -> bool:
+    """Encerra o painel em execução, de qualquer versão (todas têm /api/encerrar). True se havia um."""
+    est = _no_ar()
+    if not est:
+        return False
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{int(est['porta'])}/api/encerrar", data=b"{}", method="POST",
+                                     headers={"X-Painel-Chave": est["chave"], "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5).close()
+    except (OSError, ValueError, urllib.error.URLError):
+        pass
+    for _ in range(40):  # espera liberar a porta
+        time.sleep(0.25)
+        if not _no_ar():
+            break
+    try:  # versões antigas podem deixar o arquivo de estado para trás
+        if json.loads(ESTADO.read_text()).get("porta") == est.get("porta"):
+            ESTADO.unlink()
+    except (OSError, ValueError):
+        pass
+    return True
+
+
 def garantir_servidor() -> dict:
     est = _no_ar()
-    if est:
+    if est and _versao_no_ar(est) == atualizar.versao_local():
         return est
+    if est:
+        # O programa foi atualizado no disco, mas o painel em execução ainda é o código antigo:
+        # encerra e sobe de novo, senão a janela nova conversa com o servidor velho.
+        encerrar_servidor()
     log = open(BASE / "painel.log", "a")
     subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir"], stdin=subprocess.DEVNULL,
                      stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
@@ -593,6 +631,7 @@ def main() -> None:
     ap.add_argument("--porta", type=int, default=0)
     ap.add_argument("--ocioso", type=int, default=OCIOSO_S)
     ap.add_argument("--reaproveitar", action="store_true")
+    ap.add_argument("--encerrar", action="store_true")
     ap.add_argument("--pos-atualizacao", action="store_true")
     a = ap.parse_args()
 
@@ -602,6 +641,9 @@ def main() -> None:
     if a.pos_atualizacao:
         criar_app()
         op_registrar_claude()
+        return
+    if a.encerrar:
+        print("Painel encerrado." if encerrar_servidor() else "O painel não estava aberto.")
         return
     if a.instalar_app:
         app = criar_app()
