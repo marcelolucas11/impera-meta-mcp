@@ -467,7 +467,24 @@ def _soma(rows: list) -> dict:
     return _derive(t)
 
 
-def _insight_fields(level: str, com_alcance: bool) -> str:
+_VIDEO = {  # coluna -> campo da API (cada um é uma lista de ações do tipo video_view)
+    "video_plays": "video_play_actions",
+    "video_p25": "video_p25_watched_actions",
+    "video_p50": "video_p50_watched_actions",
+    "video_p75": "video_p75_watched_actions",
+    "video_p100": "video_p100_watched_actions",
+    "thruplays": "video_thruplay_watched_actions",
+}
+
+
+def _vsum(items: Any) -> float:
+    """Campos de vídeo vêm como lista de ações (em geral só video_view): soma os valores."""
+    if not items:
+        return 0.0
+    return sum(_f(i.get("value")) for i in items)
+
+
+def _insight_fields(level: str, com_alcance: bool, com_video: bool = False) -> str:
     f = ["account_id"]
     if level in ("campaign", "adset", "ad"):
         f += ["campaign_id", "campaign_name", "objective"]
@@ -478,16 +495,18 @@ def _insight_fields(level: str, com_alcance: bool) -> str:
     f += ["spend", "impressions", "clicks", "inline_link_clicks", "actions", "action_values"]
     if com_alcance:
         f += ["reach", "frequency"]
+    if com_video:
+        f += list(_VIDEO.values())
     return ",".join(f)
 
 
 async def _insights(client: httpx.AsyncClient, act: str, level: str, d1: date, d2: date, por_dia: bool,
                     breakdowns: list, sem: asyncio.Semaphore, campanha_ids: Optional[list] = None,
-                    avisos: Optional[list] = None) -> list:
+                    avisos: Optional[list] = None, com_video: bool = False) -> list:
     com_alcance = "hourly_stats_aggregated_by_advertiser_time_zone" not in breakdowns
     base = {
         "level": level,
-        "fields": _insight_fields(level, com_alcance),
+        "fields": _insight_fields(level, com_alcance, com_video),
         "time_increment": "1" if por_dia else "all_days",
         "use_unified_attribution_setting": "true",
         "limit": PAGINA,
@@ -539,7 +558,12 @@ async def _insights(client: httpx.AsyncClient, act: str, level: str, d1: date, d
         if avisos is not None:
             avisos.append(f"A Meta recusou o filtro de status no nível {level}; itens arquivados ou "
                           "excluídos podem estar fora das linhas (o total da conta continua completo).")
-    return [_norm(r, por_dia) for r in raw]
+    rows = [_norm(r, por_dia) for r in raw]
+    if com_video:
+        for r, row in zip(rows, raw):
+            for col, campo in _VIDEO.items():
+                r[col] = _vsum(row.get(campo))
+    return rows
 
 
 # ───────────────────────── estrutura ─────────────────────────
@@ -601,12 +625,14 @@ async def _estrutura(client: httpx.AsyncClient, conta: dict, niveis: set, soment
         out["conjuntos"] = res
 
     async def anuncios():
-        f = "id,name,adset_id,campaign_id,status,effective_status,created_time,creative{id,name}"
+        f = "id,name,adset_id,campaign_id,status,effective_status,created_time,creative{id,name,object_type,video_id}"
         rows = await _get_all(client, f"{conta['act']}/ads", dict(fields=f, limit=200, **extra), sem)
         out["anuncios"] = [{
             "anuncio": a.get("name"), "anuncio_id": a.get("id"), "conjunto_id": a.get("adset_id"),
             "campanha_id": a.get("campaign_id"), "status": a.get("effective_status"),
             "criativo_id": (a.get("creative") or {}).get("id"),
+            "tipo_criativo": (a.get("creative") or {}).get("object_type"),
+            "video_id": (a.get("creative") or {}).get("video_id"),
             "criado_em": (a.get("created_time") or "")[:10] or None,
         } for a in rows]
 
@@ -684,7 +710,8 @@ def _colunas_xlsx(level: str, por_dia: bool, breakdowns: list, moeda: str) -> li
 
 
 _IDS = {"campanha_id", "conjunto_id", "anuncio_id", "criativo_id"}
-_CONTAGENS = {"impressoes", "alcance", "cliques", "cliques_link", "lpv", "carrinho", "checkout", "compras"}
+_CONTAGENS = {"impressoes", "alcance", "cliques", "cliques_link", "lpv", "carrinho", "checkout", "compras",
+              "video_plays", "video_p25", "video_p50", "video_p75", "video_p100", "thruplays"}
 
 
 def _cell(key: str, v: Any) -> Any:
@@ -859,7 +886,8 @@ async def estrutura_conta(
     max_linhas: Annotated[int, Field(description="Teto de linhas por nível na resposta.", ge=1, le=2000)] = 300,
 ) -> str:
     """Estrutura real da conta: orçamento diário, estratégia de lance, limite de CPA (bid_amount),
-    ROAS mínimo, objetivo, status e público de cada campanha/conjunto. Valores já na moeda da conta.
+    ROAS mínimo, objetivo, status e público de cada campanha/conjunto. No nível anúncios, também o
+    tipo do criativo (tipo_criativo: VIDEO, SHARE, PHOTO...) e o video_id. Valores já na moeda da conta.
     Serve para conferir os limites de CPA contra o que o nome da campanha diz."""
     try:
         nome_cliente = _usar_cliente(cliente)
@@ -891,10 +919,12 @@ async def consultar_insights(
                               "dispositivo", "regiao", "hora"], Field(description="Detalhamento.")] = "nenhuma",
     campanha_ids: Annotated[Optional[list[str]], Field(description="Filtra por IDs de campanha.")] = None,
     max_linhas: Annotated[int, Field(description="Teto de linhas na resposta (ordenadas por gasto).", ge=1, le=3000)] = 200,
+    com_video: Annotated[bool, Field(description="True acrescenta as colunas de vídeo: video_plays, video_p25, "
+                                                 "video_p50, video_p75, video_p100 e thruplays.")] = False,
 ) -> str:
     """Métricas de desempenho direto da Meta, em CSV: gasto, impressões, alcance, frequência, cliques
     no link, visualizações de página, carrinho, checkout, compras, valor de conversão, CTR, CPM, CPC,
-    CPA, ROAS e ticket. Usa a atribuição configurada em cada conjunto, como o Gerenciador. O bloco
+    CPA, ROAS e ticket; com com_video, também reproduções, 25/50/75/100% do vídeo e ThruPlays. Usa a atribuição configurada em cada conjunto, como o Gerenciador. O bloco
     TOTAL soma só o que é somável; alcance e frequência nunca devem ser somados entre linhas."""
     try:
         nome_cliente = _usar_cliente(cliente)
@@ -904,7 +934,7 @@ async def consultar_insights(
         async with _client() as c:
             acc = await _resolve_account(c, conta)
             rows = await _insights(c, acc["act"], level, d1, d2, por_dia, bks,
-                                   asyncio.Semaphore(MAX_SIMULTANEAS), campanha_ids, avisos)
+                                   asyncio.Semaphore(MAX_SIMULTANEAS), campanha_ids, avisos, com_video)
         total = _soma(rows)
         cols = []
         if por_dia:
@@ -918,6 +948,8 @@ async def consultar_insights(
             cols += ["anuncio", "anuncio_id"]
         cols += ["gasto", "impressoes", "alcance", "frequencia", "cliques_link", "lpv", "carrinho", "checkout",
                  "compras", "valor_compras", "ctr_link", "cpm", "cpc_link", "cpa", "roas", "ticket"]
+        if com_video:
+            cols += list(_VIDEO)
         if por_dia:
             rows.sort(key=lambda r: (r.get("dia") or "", -(r.get("gasto") or 0)))
             mostrar = rows[:max_linhas]

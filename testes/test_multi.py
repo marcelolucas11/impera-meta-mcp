@@ -102,6 +102,12 @@ def handler(req):
         facts = [f for f in FACTS[cli] if since <= f["day"] <= until]
         if level == "ad": facts = [f for f in facts if (f["ad"][7] in statuses if statuses else f["ad"][7] != "ARCHIVED")]
         rows = agg(facts, level, daily, bks, since, until, acc)
+        if "video_play_actions" in q["fields"][0]:
+            for r in rows:  # vídeo: plays = impressões/4, cada quartil um pouco menor (lista de ações video_view)
+                base = int(r["impressions"]) // 4
+                for i, campo in enumerate(("video_play_actions", "video_p25_watched_actions", "video_p50_watched_actions",
+                                           "video_p75_watched_actions", "video_p100_watched_actions", "video_thruplay_watched_actions")):
+                    r[campo] = [{"action_type": "video_view", "value": str(base - i * 10)}]
         limit = int(q.get("limit", ["25"])[0]); off = int(q.get("after", ["0"])[0])
         body = {"data": rows[off:off + limit], "paging": {"cursors": {"after": str(off + limit)}}}
         if off + limit < len(rows): body["paging"]["next"] = "https://graph.facebook.com/x?access_token=NAO_SEGUIR"
@@ -110,6 +116,12 @@ def handler(req):
         return httpx.Response(200, json={"data": [{"id": a[0], "name": a[1], "objective": a[2], "effective_status": "ACTIVE", "daily_budget": "50000"} for a in ADS[cli]]})
     if p == f"act_{acc}/adsets":
         return httpx.Response(200, json={"data": [{"id": a[3], "name": a[4], "campaign_id": a[0], "effective_status": "ACTIVE", "bid_amount": "600", "bid_strategy": "COST_CAP"} for a in ADS[cli]]})
+    if p == f"act_{acc}/ads":
+        assert "object_type" in q["fields"][0] and "video_id" in q["fields"][0], q["fields"][0]
+        return httpx.Response(200, json={"data": [{"id": a[5], "name": a[6], "adset_id": a[3], "campaign_id": a[0], "effective_status": a[7],
+                                                   "creative": {"id": a[5] + "9", "object_type": "VIDEO" if i % 2 else "SHARE",
+                                                                **({"video_id": "77" + a[5][-3:]} if i % 2 else {})}}
+                                                  for i, a in enumerate(ADS[cli], 1)]})
     return err(400, 100, f"Unsupported get request on {p}")
 
 server._TRANSPORT = httpx.MockTransport(handler)
@@ -153,6 +165,22 @@ async def main():
     cruzou = [(c, p) for c, p in LOG[n0:] if p.startswith("act_") and not p.startswith(f"act_{ACC[c]}")]
     check("simultâneas: cada token só tocou a própria conta", not cruzou and f"{T['primos']['spend']:,.2f}" in a and f"{T['donaco']['spend']:,.2f}" in b, f"{len(LOG) - n0} requisições, cruzadas={len(cruzou)}")
     check("simultâneas: período dividido e paginado", STATE["too_much"] > 0 and "Linhas: 252" in a and "Linhas: 168" in b, f"{a.splitlines()[1][:12]} / {b.splitlines()[1][:12]}")
+
+    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, com_video=True, max_linhas=3000)
+    linhas = out.split("\n\n", 1)[1].splitlines()
+    cab = linhas[0].split(",")
+    check("com_video: colunas de vídeo no fim, na ordem", cab[-6:] == ["video_plays", "video_p25", "video_p50", "video_p75", "video_p100", "thruplays"], ",".join(cab[-6:]))
+    import csv as _csv, io as _io
+    rr = list(_csv.DictReader(_io.StringIO(out.split("\n\n", 1)[1])))
+    check("com_video: valores inteiros e coerentes (plays = impressões/4, quartis caindo)",
+          all(int(r["video_plays"]) == int(r["impressoes"]) // 4 and int(r["video_p25"]) == int(r["video_plays"]) - 10
+              and int(r["thruplays"]) == int(r["video_plays"]) - 50 for r in rr) and len(rr) == 42, f"{len(rr)} linhas")
+    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, max_linhas=3)
+    check("sem com_video: nada muda (sem colunas de vídeo)", "video_plays" not in out and out.split("\n\n", 1)[1].splitlines()[0].endswith(",ticket"))
+    out = await server.estrutura_conta(cliente="primos", nivel="anuncios", somente_ativos=False)
+    est = json.loads(next(l for l in out.splitlines() if l.startswith("[")))
+    check("estrutura anúncios: tipo do criativo e video_id", [e.get("tipo_criativo") for e in est] == ["VIDEO", "SHARE", "VIDEO"]
+          and est[0].get("video_id") and "video_id" not in est[1], json.dumps(est[:2], ensure_ascii=False)[:160])
 
     out = await server.estrutura_conta(cliente="primos", nivel="conjuntos")
     check("estrutura: limite de CPA em reais", "Cliente: primos" in out and '"limite_cpa_ou_lance":6.0' in out)
