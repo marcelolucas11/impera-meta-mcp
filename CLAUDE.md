@@ -2,6 +2,8 @@
 
 Repositório do app Impera Meta MCP (Mac) e do servidor MCP `meta-ads`. O dono é o Marcelo (Impera Services). Ele pede mudanças na conversa e o Claude aplica, testa e publica aqui.
 
+História, decisões, estado atual e pendências: `docs/CONTEXTO.md`.
+
 ## Fluxo de cada atualização
 
 1. Aplicar a mudança.
