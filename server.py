@@ -1264,8 +1264,50 @@ async def _objeto(c: httpx.AsyncClient, obj_id: str, campos: str = "") -> tuple:
     if str(obj.get("account_id")) != conta["id"]:
         raise MetaError(f"O objeto {obj_id} é da conta {obj.get('account_id')}, não da conta padrão do cliente "
                         f"'{_cliente_id()}' ({conta['nome']}, {conta['id']}). Nada foi alterado.")
-    tipo = (obj.get("metadata") or {}).get("type") or ""
+    tipo = await _descobrir_tipo(c, str(obj_id), obj)
     return obj, tipo, conta
+
+
+# Nomes que a Meta pode devolver em metadata.type (inclui os nomes internos antigos:
+# campanha = adcampaign_group, conjunto = adcampaign, anúncio = adgroup).
+_TIPOS_META = {
+    "campaign": "campaign", "adcampaign_group": "campaign", "adcampaigngroup": "campaign",
+    "adset": "adset", "ad_set": "adset", "adcampaign": "adset",
+    "ad": "ad", "adgroup": "ad",
+}
+# Sondagem quando a Meta não manda metadata: cada campo só existe num tipo de objeto
+# (adset_id só no anúncio; campaign_id no conjunto e no anúncio; objective só na campanha).
+_SONDAS = (("adset_id", "ad"), ("campaign_id", "adset"), ("objective", "campaign"))
+
+
+def _tipo_frase(tipo: str) -> str:
+    return {"campaign": "de uma campanha", "adset": "de um conjunto", "ad": "de um anúncio"}.get(
+        tipo, "de um tipo que não deu para identificar (confira se é campanha, conjunto ou anúncio)")
+
+
+def _normalizar_tipo(valor: Any) -> str:
+    return _TIPOS_META.get(re.sub(r"[^a-z_]", "", str(valor or "").lower()), "")
+
+
+async def _descobrir_tipo(c: httpx.AsyncClient, obj_id: str, obj: dict) -> str:
+    """Descobre se o ID é campanha, conjunto ou anúncio sem depender só do metadata da Meta,
+    que em versões novas da API pode vir vazio ou com nomes antigos."""
+    tipo = _normalizar_tipo((obj.get("metadata") or {}).get("type"))
+    if tipo:
+        return tipo
+    for campo, candidato in _SONDAS:
+        try:
+            r = await _get(c, obj_id, {"fields": campo})
+        except MetaError as e:
+            if e.code != 100:
+                raise
+            achado = re.search(r"node type \((\w+)\)", str(e), re.I)
+            if achado and _normalizar_tipo(achado.group(1)):
+                return _normalizar_tipo(achado.group(1))
+            continue
+        if r.get(campo):
+            return candidato
+    return ""
 
 
 def _ok_pausado(tipo: str, novo_id: str, nome: str) -> str:
@@ -1325,11 +1367,11 @@ async def alterar_orcamento(
         async with _client() as c:
             obj, tipo, conta = await _objeto(c, id)
             if tipo not in ("campaign", "adset"):
-                raise MetaError(f"Orçamento é de campanha ou conjunto; este ID é {tipo or 'de outro tipo'}.")
+                raise MetaError(f"Orçamento é de campanha ou conjunto; este ID é {_tipo_frase(tipo)}.")
             obj.update(await _get(c, str(id), {"fields": "daily_budget,lifetime_budget"}))
             moeda = conta["moeda"]
             if (limite_cpa is not None or roas_minimo is not None) and tipo != "adset":
-                raise MetaError("Limite de CPA e ROAS mínimo são do conjunto de anúncios; este ID é de " + (tipo or "outro tipo") + ".")
+                raise MetaError(f"Limite de CPA e ROAS mínimo são do conjunto de anúncios; este ID é {_tipo_frase(tipo)}.")
             _checar_teto(orcamento_diario, moeda)
             dados: dict = {}
             antes = []
@@ -1398,7 +1440,7 @@ async def duplicar(
         async with _client() as c:
             obj, tipo, conta = await _objeto(c, id)
             if tipo not in ("campaign", "adset", "ad"):
-                raise MetaError(f"Só dá para duplicar campanha, conjunto ou anúncio (este ID é {tipo or 'desconhecido'}).")
+                raise MetaError(f"Só dá para duplicar campanha, conjunto ou anúncio (este ID é {_tipo_frase(tipo)}).")
             if tipo in ("campaign", "adset"):
                 orc = await _get(c, str(id), {"fields": "daily_budget"})
                 _checar_teto(_minor(orc.get("daily_budget"), conta["moeda"]), conta["moeda"])

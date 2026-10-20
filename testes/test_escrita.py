@@ -39,7 +39,10 @@ OBJ = {  # objetos na Meta simulada
     "120000000000000021": {"name": "video_carro_01", "account_id": "111111111111111", "type": "ad", "effective_status": "ACTIVE"},
     "130000000000000001": {"name": "campanha de outro cliente", "account_id": "999999999999999", "type": "campaign", "effective_status": "ACTIVE"},
 }
-POSTS, URLS, AUTH_IMAGEM, ESTADO = [], [], [], {"falha_500": False, "limite": 0, "timeout": False, "novo": 500}
+# Campos que só existem em certos tipos (a Meta real dá erro #100 para os outros).
+SO_EM = {"adset_id": ("ad",), "campaign_id": ("ad", "adset"), "objective": ("campaign",)}
+NO_TYPE = {"campaign": "Campaign", "adset": "AdSet", "ad": "Ad"}
+POSTS, URLS, AUTH_IMAGEM, ESTADO = [], [], [], {"metadata": "normal", "falha_500": False, "limite": 0, "timeout": False, "novo": 500}
 
 
 def err(status, code, msg):
@@ -70,9 +73,15 @@ def handler(req: httpx.Request) -> httpx.Response:
         if p in OBJ:
             o = OBJ[p]
             campos = q.get("fields", [""])[0].split(",")
+            for k in campos:
+                if k in SO_EM and o["type"] not in SO_EM[k]:
+                    return err(400, 100, f"(#100) Tried accessing nonexisting field ({k}) on node type ({NO_TYPE[o['type']]})")
             body = {"id": p, **{k: o[k] for k in campos if k in o}}
-            if q.get("metadata"):
-                body["metadata"] = {"type": o["type"]}
+            if "adset_id" in campos and o["type"] == "ad":
+                body["adset_id"] = "120000000000000011"
+            if q.get("metadata") and ESTADO["metadata"] != "sem":
+                legado = {"campaign": "adcampaign_group", "adset": "adcampaign", "ad": "adgroup"}
+                body["metadata"] = {"type": legado[o["type"]] if ESTADO["metadata"] == "legado" else o["type"]}
             return httpx.Response(200, json=body)
         if p == "555000000000001":
             return httpx.Response(200, json={"picture": "https://scontent.exemplo/thumb.jpg", "id": p})
@@ -239,6 +248,27 @@ async def main():
         check(f"leitura de apoio: {nome}", esperado in r and not r.startswith("ERRO"), r.splitlines()[0][:80])
     out = await server.listar_clientes()
     check("listar_clientes mostra as permissões", "dona,dona,222222222222222,auto,ler+status+orcamento+editar+criar" in out, out.splitlines()[2][:100])
+
+    # A Meta real pode não mandar metadata.type (ou mandar nomes antigos): o tipo tem que ser descoberto mesmo assim
+    cliente("primos", "status,orcamento,editar,criar", teto="5000")
+    for modo in ("sem", "legado"):
+        ESTADO["metadata"] = modo
+        n = len(POSTS)
+        out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=500, cliente="primos")
+        check(f"metadata {modo}: orçamento de campanha", out.startswith("Cliente") and posts_desde(n)[-1][:2] == ("120000000000000001", {"daily_budget": "50000"}), out[:120])
+        n = len(POSTS)
+        out = await server.alterar_orcamento(id="120000000000000011", orcamento_diario=130, cliente="primos")
+        check(f"metadata {modo}: orçamento de conjunto", "OK conjunto" in out and posts_desde(n)[-1][0] == "120000000000000011", out[:120])
+        out = await server.alterar_orcamento(id="120000000000000021", orcamento_diario=50, cliente="primos")
+        check(f"metadata {modo}: anúncio continua recusado no orçamento", out.startswith("ERRO") and "anúncio" in out, out[:120])
+        n = len(POSTS)
+        out = await server.duplicar(id="120000000000000001", cliente="primos")
+        check(f"metadata {modo}: duplica campanha com deep_copy e PAUSADA", posts_desde(n) and posts_desde(n)[0][0] == "120000000000000001/copies"
+              and posts_desde(n)[0][1].get("deep_copy") == "true" and posts_desde(n)[0][1]["status_option"] == "PAUSED", out[:120])
+        n = len(POSTS)
+        out = await server.duplicar(id="120000000000000021", cliente="primos")
+        check(f"metadata {modo}: duplica anúncio sem deep_copy", posts_desde(n) and "deep_copy" not in posts_desde(n)[0][1], out[:120])
+    ESTADO["metadata"] = "normal"
 
     tudo = "\n".join((tmp / "historico" / a).read_text() for a in os.listdir(tmp / "historico"))
     check("histórico sem token e sem bytes de imagem", not any(t in tudo for t in TOK.values()) and "bytes" not in tudo)
