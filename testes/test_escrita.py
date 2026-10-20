@@ -37,12 +37,26 @@ OBJ = {  # objetos na Meta simulada
     "120000000000000011": {"name": "aberto 18-65", "account_id": "111111111111111", "type": "adset", "daily_budget": "20000",
                            "effective_status": "ACTIVE", "campaign_id": "120000000000000002"},
     "120000000000000021": {"name": "video_carro_01", "account_id": "111111111111111", "type": "ad", "effective_status": "ACTIVE"},
+    "120000000000000003": {"name": "imp_vend_210826_cpa_teste_7", "account_id": "111111111111111", "type": "campaign",
+                           "objective": "OUTCOME_SALES", "daily_budget": "600000", "effective_status": "ACTIVE"},
     "130000000000000001": {"name": "campanha de outro cliente", "account_id": "999999999999999", "type": "campaign", "effective_status": "ACTIVE"},
 }
 # Campos que só existem em certos tipos (a Meta real dá erro #100 para os outros).
 SO_EM = {"adset_id": ("ad",), "campaign_id": ("ad", "adset"), "objective": ("campaign",)}
 NO_TYPE = {"campaign": "Campaign", "adset": "AdSet", "ad": "Ad"}
-POSTS, URLS, AUTH_IMAGEM, ESTADO = [], [], [], {"metadata": "normal", "falha_500": False, "limite": 0, "timeout": False, "novo": 500}
+POSTS, URLS, AUTH_IMAGEM, ESTADO = [], [], [], {"metadata": "normal", "falha_orcamento": False, "falha_500": False, "limite": 0, "timeout": False, "novo": 500}
+
+
+VEICULOU = {
+    "campaign": [{"campaign_id": "120000000000000001", "spend": "300.00", "impressions": "9000"},
+                 {"campaign_id": "120000000000000002", "spend": "120.00", "impressions": "5000"},
+                 {"campaign_id": "120000000000000099", "spend": "10.00", "impressions": "400"}],
+    "adset": [{"campaign_id": "120000000000000002", "adset_id": "120000000000000011", "spend": "120.00", "impressions": "5000"}],
+    "ad": [{"campaign_id": "120000000000000002", "adset_id": "120000000000000011", "ad_id": "120000000000000021",
+            "spend": "120.00", "impressions": "5000"}],
+}
+TIPO_EDGE = {"campaigns": "campaign", "adsets": "adset", "ads": "ad"}
+FILTROS = []
 
 
 def err(status, code, msg):
@@ -68,6 +82,21 @@ def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Sorteio dos Primos", "instagram_business_account": {"id": "17841400000000001", "username": "sorteiodosprimos"}}]})
         if p.endswith("/adimages"):
             return httpx.Response(200, json={"data": [{"hash": "abc123hash", "name": "carro.jpg", "width": 1080, "height": 1080, "created_time": "2026-10-01T00:00:00+0000"}]})
+        if p.endswith("/insights"):
+            return httpx.Response(200, json={"data": [dict(r, account_id="111111111111111", date_start=q["time_range"][0][10:20],
+                                                           date_stop="x") for r in VEICULOU[q["level"][0]]]})
+        if p.split("/")[-1] in TIPO_EDGE:
+            dono, edge = p.split("/")[0], p.split("/")[-1]
+            itens = [dict(o, id=k) for k, o in OBJ.items() if o["type"] == TIPO_EDGE[edge] and o["account_id"] == "111111111111111"]
+            if dono in OBJ:  # conjuntos de uma campanha
+                itens = [i for i in itens if i.get("campaign_id") == dono]
+            if q.get("effective_status"):
+                itens = [i for i in itens if i["effective_status"] in json.loads(q["effective_status"][0])]
+            if q.get("filtering"):
+                fl = json.loads(q["filtering"][0]); FILTROS.append((edge, fl))
+                ids = [v for f in fl if f["field"] == "id" for v in f["value"]]
+                itens = [i for i in itens if i["id"] in ids]
+            return httpx.Response(200, json={"data": itens})
         if p == "search":
             return httpx.Response(200, json={"data": [{"key": "260131", "name": "Feira de Santana", "region": "Bahia", "country_code": "BR"}]})
         if p in OBJ:
@@ -97,6 +126,8 @@ def handler(req: httpx.Request) -> httpx.Response:
     if ESTADO["falha_500"]:
         ESTADO["falha_500"] = False; POSTS.append((p, form, "500"))
         return err(500, 2, "Service temporarily unavailable")
+    if ESTADO["falha_orcamento"] and "daily_budget" in form:
+        POSTS.append((p, form, "recusado")); return err(400, 100, "Invalid parameter: daily_budget")
     POSTS.append((p, form, "ok"))
     ESTADO["novo"] += 1
     novo = f"120000000000{ESTADO['novo']:06d}"
@@ -269,6 +300,79 @@ async def main():
         out = await server.duplicar(id="120000000000000021", cliente="primos")
         check(f"metadata {modo}: duplica anúncio sem deep_copy", posts_desde(n) and "deep_copy" not in posts_desde(n)[0][1], out[:120])
     ESTADO["metadata"] = "normal"
+
+    # Chave "Exigir período"
+    cliente("primos", "status,orcamento,editar,criar", teto="1000")
+    with open(tmp / "clientes/primos.env", "a") as f:
+        f.write("EXIGIR_PERIODO=1\n")
+    antes = sum("/insights" in u for u in URLS)
+    out = await server.consultar_insights(cliente="primos")
+    check("exigir período: consulta sem datas recusada e nada consultado", out.startswith("ERRO") and "exige período" in out
+          and "pergunte" in out and sum("/insights" in u for u in URLS) == antes, out[:120])
+    out = await server.consultar_insights(cliente="primos", desde="2026-10-13")
+    check("exigir período: só a data inicial não basta", out.startswith("ERRO") and "exige período" in out)
+    out = await server.exportar_relatorio(cliente="primos")
+    check("exigir período: relatório sem datas recusado", out.startswith("ERRO") and "exige período" in out)
+    out = await server.consultar_insights(cliente="primos", desde="2026-10-13", ate="2026-10-19")
+    check("exigir período: com datas, consulta normal", not out.startswith("ERRO") and "2026-10-13 a 2026-10-19" in out, out[:120])
+    out = await server.listar_clientes()
+    check("listar_clientes mostra se exige período", ",sim," in out.splitlines()[2], out.splitlines()[2][:120])
+    out = await server.estrutura_conta(cliente="primos", nivel="campanhas")
+    check("estrutura sem período continua liberada para achar IDs", not out.startswith("ERRO") and "Só itens ativos" in out)
+
+    # Estrutura filtrada pelo que veiculou no período
+    FILTROS.clear()
+    out = await server.estrutura_conta(cliente="primos", nivel="campanhas", desde="2026-10-13", ate="2026-10-19")
+    dados = json.loads(out.split("## campanhas: ")[1].split("\n", 1)[1].splitlines()[0])
+    check("período: só o que veiculou, pausado incluído, ordenado por gasto",
+          [(d["campanha_id"], d["gasto_periodo"], d["status"]) for d in dados] ==
+          [("120000000000000001", 300.0, "ACTIVE"), ("120000000000000002", 120.0, "PAUSED")], str(dados)[:160])
+    check("período: o que não veiculou fica de fora (cpa_teste_7)", "cpa_teste_7" not in out)
+    check("período: avisa o que veiculou mas não existe mais", "1 que veicularam no período já não aparecem" in out)
+    check("período: busca na Meta só os IDs que veicularam", FILTROS and FILTROS[0][0] == "campaigns"
+          and sorted(FILTROS[0][1][0]["value"]) == ["120000000000000001", "120000000000000002", "120000000000000099"], str(FILTROS)[:120])
+    out = await server.estrutura_conta(cliente="primos", nivel="tudo", desde="2026-10-13", ate="2026-10-19")
+    check("período, nível tudo: campanha, conjunto e anúncio do que veiculou",
+          "## campanhas: 1" in out and "## conjuntos: 1" in out and "## anuncios: 1" in out and "120000000000000021" in out
+          and "[VENDAS] cpa_600" not in out, out.replace("\n", " | ")[:160])
+    out = await server.estrutura_conta(cliente="primos", nivel="campanhas", somente_ativos=False)
+    check("sem período: lista pelo status, como antes", "cpa_teste_7" in out and "gasto_periodo" not in out)
+
+    # Duplicar com orçamento da cópia
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000003", cliente="primos")
+    check("duplicar cpa_teste_7 (R$ 6.000) sem orçamento: teto recusa sem criar", out.startswith("ERRO") and "passa do teto" in out and posts_desde(n) == [], out[:100])
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=1500, cliente="primos")
+    check("duplicar com orçamento acima do teto: recusa sem criar", out.startswith("ERRO") and "passa do teto" in out and posts_desde(n) == [])
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000003", novo_nome="cpa_teste_7_b", quantidade=2, orcamento_diario=300, cliente="primos")
+    env = [(p.split("/")[-1], sorted(f)) for p, f, _ in posts_desde(n)]
+    orcs = [f["daily_budget"] for p, f, _ in posts_desde(n) if "daily_budget" in f]
+    check("duplicar com orçamento: cópia, nome e orçamento de cada uma",
+          [e[0] == "copies" for e in env] == [True, False, False, True, False, False] and orcs == ["30000", "30000"]
+          and all(f["status_option"] == "PAUSED" for p, f, _ in posts_desde(n) if p.endswith("/copies")), str(env)[:160])
+    check("duplicar com orçamento: resposta mostra o orçamento novo", out.count("OK ") == 2 and "orçamento diário BRL 300.00" in out, out[:160])
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000002", orcamento_diario=100, cliente="primos")
+    check("campanha com orçamento nos conjuntos: orcamento_diario recusado sem criar", out.startswith("ERRO") and "orçamentos ficam nos conjuntos" in out and posts_desde(n) == [])
+    out = await server.duplicar(id="120000000000000021", orcamento_diario=50, cliente="primos")
+    check("anúncio com orcamento_diario: recusado", out.startswith("ERRO") and "Anúncio não tem orçamento" in out)
+    cliente("primos", "status,orcamento,editar,criar", teto="150")
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000002", cliente="primos")
+    check("teto vale para os conjuntos de campanha sem orçamento de campanha", out.startswith("ERRO") and "200.00" in out and posts_desde(n) == [], out[:120])
+    cliente("primos", "status,criar", teto="1000")
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="primos")
+    check("orçamento na cópia exige a permissão de orçamentos", out.startswith("ERRO") and "orçamentos e lances" in out)
+    cliente("primos", "status,orcamento,editar,criar", teto="1000")
+    ESTADO["falha_orcamento"] = True
+    n = len(POSTS)
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="primos")
+    ESTADO["falha_orcamento"] = False
+    check("orçamento recusado depois da cópia: avisa, não repete e manda ajustar antes de ativar",
+          "PARCIAL" in out and "NÃO foi trocado" in out and "6,000.00" in out and "Antes de ativar" in out
+          and [s for _, _, s in posts_desde(n)] == ["ok", "recusado"], out[:200])
 
     tudo = "\n".join((tmp / "historico" / a).read_text() for a in os.listdir(tmp / "historico"))
     check("histórico sem token e sem bytes de imagem", not any(t in tudo for t in TOK.values()) and "bytes" not in tudo)

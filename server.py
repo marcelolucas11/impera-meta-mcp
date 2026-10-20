@@ -62,7 +62,8 @@ log = logging.getLogger("meta-ads-mcp")
 # Chaves que pertencem a um cliente. Nunca são lidas de outro lugar que não o
 # arquivo do cliente ativo: é isso que impede usar o token de um na conta de outro.
 _POR_CLIENTE = {"META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_BUSINESS_ID",
-                "META_PURCHASE_ACTION", "META_APP_SECRET", "NOME", "PERMISSOES", "ORCAMENTO_MAX_DIA"}
+                "META_PURCHASE_ACTION", "META_APP_SECRET", "NOME", "PERMISSOES", "ORCAMENTO_MAX_DIA",
+                "EXIGIR_PERIODO"}
 _ATIVO: contextvars.ContextVar = contextvars.ContextVar("cliente_ativo", default=None)
 
 
@@ -301,6 +302,21 @@ def _parse_date(s: str, campo: str) -> date:
         return datetime.strptime(s.strip(), "%Y-%m-%d").date()
     except ValueError:
         raise MetaError(f"Data inválida em '{campo}': {s!r}. Use o formato AAAA-MM-DD.")
+
+
+def _exige_periodo(valor: Optional[str] = None) -> bool:
+    v = _cfg("EXIGIR_PERIODO") if valor is None else valor
+    return (v or "").strip().lower() in ("1", "sim", "true")
+
+
+def _checar_periodo(desde: Optional[str], ate: Optional[str]) -> None:
+    """Com a chave 'Exigir período' ligada, nenhuma análise roda com um período que o usuário não escolheu."""
+    if _exige_periodo() and not (desde and ate):
+        raise MetaError(
+            f"O cliente '{_cliente_id()}' exige período nas análises (chave 'Exigir período' no app). "
+            "Se o usuário já disse o período nesta conversa (ex.: 'últimos 15 dias', 'de 1 a 10'), converta para "
+            "desde e ate no formato AAAA-MM-DD e chame de novo. Se não disse, pergunte qual é a data inicial e a "
+            "final antes de consultar. Nada foi consultado.")
 
 
 def _periodo(desde: Optional[str], ate: Optional[str]) -> tuple:
@@ -584,16 +600,38 @@ def _targeting_resumo(t: Optional[dict]) -> dict:
     }
 
 
+async def _buscar_objetos(client: httpx.AsyncClient, edge: str, params: dict, ids: Optional[list],
+                          sem: asyncio.Semaphore) -> list:
+    """Sem ids: lista o edge inteiro. Com ids: busca só esses (filtro id IN, em lotes); se a Meta
+    recusar o filtro, lista tudo e filtra aqui."""
+    if ids is None:
+        return await _get_all(client, edge, params, sem)
+    if not ids:
+        return []
+    try:
+        partes = await asyncio.gather(*(
+            _get_all(client, edge, dict(params, filtering=json.dumps(
+                [{"field": "id", "operator": "IN", "value": ids[i:i + 100]}])), sem)
+            for i in range(0, len(ids), 100)))
+        return [x for p in partes for x in p]
+    except MetaError as e:
+        if e.code != 100:
+            raise
+        alvo = set(ids)
+        return [x for x in await _get_all(client, edge, params, sem) if x.get("id") in alvo]
+
+
 async def _estrutura(client: httpx.AsyncClient, conta: dict, niveis: set, somente_ativos: bool,
-                     sem: asyncio.Semaphore) -> dict:
+                     sem: asyncio.Semaphore, ids: Optional[dict] = None) -> dict:
     moeda = conta["moeda"]
-    extra = {"effective_status": json.dumps(["ACTIVE"])} if somente_ativos else {}
+    extra = {"effective_status": json.dumps(["ACTIVE"])} if somente_ativos and not ids else {}
+    ids = ids or {}
     out: dict = {}
 
     async def campanhas():
         f = ("id,name,objective,status,effective_status,bid_strategy,daily_budget,lifetime_budget,"
              "spend_cap,created_time,start_time,stop_time")
-        rows = await _get_all(client, f"{conta['act']}/campaigns", dict(fields=f, limit=200, **extra), sem)
+        rows = await _buscar_objetos(client, f"{conta['act']}/campaigns", dict(fields=f, limit=200, **extra), ids.get("campanhas"), sem)
         out["campanhas"] = [{
             "campanha": c.get("name"), "campanha_id": c.get("id"), "objetivo": c.get("objective"),
             "status": c.get("effective_status"), "estrategia_lance": c.get("bid_strategy"),
@@ -606,7 +644,7 @@ async def _estrutura(client: httpx.AsyncClient, conta: dict, niveis: set, soment
     async def conjuntos():
         f = ("id,name,campaign_id,status,effective_status,bid_strategy,bid_amount,bid_constraints,"
              "daily_budget,lifetime_budget,optimization_goal,billing_event,created_time,targeting")
-        rows = await _get_all(client, f"{conta['act']}/adsets", dict(fields=f, limit=100, **extra), sem)
+        rows = await _buscar_objetos(client, f"{conta['act']}/adsets", dict(fields=f, limit=100, **extra), ids.get("conjuntos"), sem)
         res = []
         for s in rows:
             item = {
@@ -626,7 +664,7 @@ async def _estrutura(client: httpx.AsyncClient, conta: dict, niveis: set, soment
 
     async def anuncios():
         f = "id,name,adset_id,campaign_id,status,effective_status,created_time,creative{id,name,object_type,video_id}"
-        rows = await _get_all(client, f"{conta['act']}/ads", dict(fields=f, limit=200, **extra), sem)
+        rows = await _buscar_objetos(client, f"{conta['act']}/ads", dict(fields=f, limit=200, **extra), ids.get("anuncios"), sem)
         out["anuncios"] = [{
             "anuncio": a.get("name"), "anuncio_id": a.get("id"), "conjunto_id": a.get("adset_id"),
             "campanha_id": a.get("campaign_id"), "status": a.get("effective_status"),
@@ -794,9 +832,10 @@ async def listar_clientes() -> str:
             "evento_compra": v.get("META_PURCHASE_ACTION") or "auto", "pasta_relatorios": str(raiz / n),
             "permissoes": "ler" + "".join("+" + x for x in _parse_permissoes(v.get("PERMISSOES"))),
             "teto_orcamento_dia": v.get("ORCAMENTO_MAX_DIA") or "",
+            "exige_periodo": "sim" if _exige_periodo(v.get("EXIGIR_PERIODO")) else "não",
         } for n, v in cs.items()]
         return f"{len(rows)} cliente(s):\n" + _csv(rows, ["cliente", "nome", "conta_padrao", "evento_compra", "permissoes",
-                                                         "teto_orcamento_dia", "pasta_relatorios"])
+                                                         "teto_orcamento_dia", "exige_periodo", "pasta_relatorios"])
     except Exception as e:
         return _tool_error(e)
 
@@ -827,6 +866,8 @@ async def _verificar_um() -> str:
                           "ads_management. Alterações vão falhar até gerar um token com essa permissão.")
     linhas.append("Permissões no app: ler" + "".join(f", {PERMISSOES[x]}" for x in _parse_permissoes(_cfg("PERMISSOES"))) + ".")
     linhas.append(f"Conta padrão: {_cfg('META_AD_ACCOUNT_ID') or 'não definida'}.")
+    if _exige_periodo():
+        linhas.append("Exigir período: ligado. Consultas e relatórios só rodam com data inicial e final informadas.")
     acao = _cfg("META_PURCHASE_ACTION")
     linhas.append("Evento de compra: " + (acao if acao and acao.lower() != "auto"
                                           else "automático (omni_purchase > purchase > pixel)") + ".")
@@ -882,25 +923,59 @@ async def estrutura_conta(
     cliente: _CLIENTE = None,
     conta: Annotated[Optional[str], Field(description="ID da conta (com ou sem act_) ou trecho do nome. Vazio usa a conta padrão.")] = None,
     nivel: Annotated[Literal["campanhas", "conjuntos", "anuncios", "tudo"], Field(description="O que listar.")] = "conjuntos",
-    somente_ativos: Annotated[bool, Field(description="True lista só o que está ativo agora.")] = True,
+    somente_ativos: Annotated[bool, Field(description="True lista só o que está ativo agora. Ignorado quando há período.")] = True,
     max_linhas: Annotated[int, Field(description="Teto de linhas por nível na resposta.", ge=1, le=2000)] = 300,
+    desde: Annotated[Optional[str], Field(description="Com período: lista só o que teve veiculação (gasto ou impressões) "
+                                                      "entre desde e ate, ativo ou pausado, ordenado por gasto. AAAA-MM-DD.")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final do período, AAAA-MM-DD. Vazio com 'desde': ontem.")] = None,
 ) -> str:
     """Estrutura real da conta: orçamento diário, estratégia de lance, limite de CPA (bid_amount),
     ROAS mínimo, objetivo, status e público de cada campanha/conjunto. No nível anúncios, também o
     tipo do criativo (tipo_criativo: VIDEO, SHARE, PHOTO...) e o video_id. Valores já na moeda da conta.
-    Serve para conferir os limites de CPA contra o que o nome da campanha diz."""
+    Para ANÁLISE, passe desde/ate: vem só o que veiculou no período (inclusive o que foi pausado
+    depois), com gasto_periodo, e a resposta fica muito menor. Sem período, lista pelo status de agora
+    (use para achar IDs antes de alterar). Serve para conferir os limites de CPA contra o nome da campanha."""
     try:
         nome_cliente = _usar_cliente(cliente)
         niveis = {"campanhas", "conjuntos", "anuncios"} if nivel == "tudo" else {nivel}
+        com_periodo = bool(desde or ate)
+        sem = asyncio.Semaphore(MAX_SIMULTANEAS)
+        avisos: list = []
+        idcol = {"campanhas": "campanha_id", "conjuntos": "conjunto_id", "anuncios": "anuncio_id"}
         async with _client() as c:
             acc = await _resolve_account(c, conta)
-            est = await _estrutura(c, acc, niveis, somente_ativos, asyncio.Semaphore(MAX_SIMULTANEAS))
-        partes = [f"Cliente: {nome_cliente} | Conta: {acc['nome']} ({acc['id']}), moeda {acc['moeda']}. "
-                  f"{'Só itens ativos.' if somente_ativos else 'Ativos e pausados (sem arquivados).'}"]
+            if com_periodo:
+                d1, d2 = _periodo(desde, ate)
+                level = "ad" if "anuncios" in niveis else ("adset" if "conjuntos" in niveis else "campaign")
+                linhas = await _insights(c, acc["act"], level, d1, d2, False, [], sem, avisos=avisos)
+                gasto: dict = {k: {} for k in idcol}
+                for r in linhas:
+                    if not ((r.get("impressoes") or 0) > 0 or (r.get("gasto") or 0) > 0):
+                        continue
+                    for k, col in idcol.items():
+                        if r.get(col):
+                            gasto[k][r[col]] = gasto[k].get(r[col], 0) + (r.get("gasto") or 0)
+                est = await _estrutura(c, acc, niveis, False, sem, {k: list(gasto[k]) for k in niveis})
+            else:
+                est = await _estrutura(c, acc, niveis, somente_ativos, sem)
+        if com_periodo:
+            filtro = (f"Só o que veiculou de {d1} a {d2} (ativos e pausados), ordenado por gasto no período "
+                      "(gasto_periodo).")
+        else:
+            filtro = "Só itens ativos." if somente_ativos else "Ativos e pausados (sem arquivados)."
+        partes = [f"Cliente: {nome_cliente} | Conta: {acc['nome']} ({acc['id']}), moeda {acc['moeda']}. {filtro}"]
+        partes += [f"AVISO: {a}" for a in avisos]
         for k in ("campanhas", "conjuntos", "anuncios"):
             if k in est:
                 itens = est[k]
-                partes.append(f"\n## {k}: {len(itens)}" + (f" (mostrando {max_linhas})" if len(itens) > max_linhas else ""))
+                faltando = 0
+                if com_periodo:
+                    for i in itens:
+                        i["gasto_periodo"] = round(gasto[k].get(i.get(idcol[k]), 0), 2)
+                    itens.sort(key=lambda i: -(i.get("gasto_periodo") or 0))
+                    faltando = len(gasto[k]) - len(itens)
+                partes.append(f"\n## {k}: {len(itens)}" + (f" (mostrando {max_linhas})" if len(itens) > max_linhas else "")
+                              + (f" | {faltando} que veicularam no período já não aparecem (arquivados ou excluídos)" if faltando > 0 else ""))
                 partes.append(json.dumps([_clean(i) for i in itens[:max_linhas]], ensure_ascii=False, separators=(",", ":")))
         return "\n".join(partes)
     except Exception as e:
@@ -911,8 +986,8 @@ async def estrutura_conta(
 async def consultar_insights(
     cliente: _CLIENTE = None,
     conta: Annotated[Optional[str], Field(description="ID da conta ou trecho do nome. Vazio usa a conta padrão.")] = None,
-    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias terminando ontem.")] = None,
-    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: ontem.")] = None,
+    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias terminando ontem (se o cliente exige período, é obrigatório).")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: ontem (se o cliente exige período, é obrigatório).")] = None,
     nivel: Annotated[Literal["conta", "campanha", "conjunto", "anuncio"], Field(description="Nível das linhas.")] = "campanha",
     por_dia: Annotated[bool, Field(description="True quebra por dia; False devolve o período inteiro (alcance deduplicado no período).")] = False,
     quebra: Annotated[Literal["nenhuma", "idade_genero", "idade", "genero", "plataforma", "posicionamento",
@@ -928,6 +1003,7 @@ async def consultar_insights(
     TOTAL soma só o que é somável; alcance e frequência nunca devem ser somados entre linhas."""
     try:
         nome_cliente = _usar_cliente(cliente)
+        _checar_periodo(desde, ate)
         d1, d2 = _periodo(desde, ate)
         level, bks = NIVEIS[nivel], QUEBRAS[quebra]
         avisos: list = []
@@ -972,8 +1048,8 @@ async def consultar_insights(
 async def exportar_relatorio(
     cliente: _CLIENTE = None,
     conta: Annotated[Optional[str], Field(description="ID da conta ou trecho do nome. Vazio usa a conta padrão.")] = None,
-    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias terminando ontem.")] = None,
-    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: ontem.")] = None,
+    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias terminando ontem (se o cliente exige período, é obrigatório).")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: ontem (se o cliente exige período, é obrigatório).")] = None,
     nivel: Annotated[Literal["anuncio", "conjunto", "campanha"], Field(description="Nível das Tabelas A e B. O prompt v4 decide por anúncio.")] = "anuncio",
     linha_de_resumo: Annotated[bool, Field(description="Inclui a linha de totais da conta (nomes em branco) no topo das Tabelas A e B, como no export do Gerenciador.")] = True,
 ) -> str:
@@ -986,6 +1062,7 @@ async def exportar_relatorio(
         from openpyxl import Workbook
 
         nome_cliente = _usar_cliente(cliente)
+        _checar_periodo(desde, ate)
         d1, d2 = _periodo(desde, ate)
         level = NIVEIS[nivel]
         avisos: list = []
@@ -1428,23 +1505,51 @@ async def duplicar(
     id: Annotated[str, Field(description="ID da campanha, conjunto ou anúncio a duplicar.")],
     novo_nome: Annotated[Optional[str], Field(description="Nome da cópia. Vazio: nome original + ' - cópia'.")] = None,
     quantidade: Annotated[int, Field(description="Quantas cópias (1 a 5).", ge=1, le=5)] = 1,
+    orcamento_diario: Annotated[Optional[float], Field(
+        description="Orçamento diário de cada cópia, na moeda da conta. Vale para conjunto e para campanha com "
+                    "orçamento de campanha. Informado, o teto do app é conferido contra este valor, e não "
+                    "contra o do original.", gt=0)] = None,
     cliente: _CLIENTE = None,
 ) -> str:
     """Duplica uma campanha (com conjuntos e anúncios), um conjunto (com anúncios) ou um anúncio, na conta
-    padrão do cliente. As cópias nascem PAUSADAS. Exige a permissão 'criar e duplicar'."""
+    padrão do cliente. As cópias nascem PAUSADAS, com o mesmo público, criativos e URLs. Com
+    orcamento_diario, cada cópia já fica com o orçamento novo. Exige a permissão 'criar e duplicar'
+    (e 'orçamentos e lances' quando muda o orçamento)."""
     try:
         nome_cliente = _usar_cliente(cliente)
         _exigir("criar")
-        params = {"novo_nome": novo_nome, "quantidade": quantidade}
+        if orcamento_diario is not None:
+            _exigir("orcamento")
+        params = {"novo_nome": novo_nome, "quantidade": quantidade, "orcamento_diario": orcamento_diario}
         linhas = []
         async with _client() as c:
             obj, tipo, conta = await _objeto(c, id)
+            moeda = conta["moeda"]
             if tipo not in ("campaign", "adset", "ad"):
                 raise MetaError(f"Só dá para duplicar campanha, conjunto ou anúncio (este ID é {_tipo_frase(tipo)}).")
+            if orcamento_diario is not None and tipo == "ad":
+                raise MetaError("Anúncio não tem orçamento próprio. Duplique sem orcamento_diario. Nada foi criado.")
             if tipo in ("campaign", "adset"):
-                orc = await _get(c, str(id), {"fields": "daily_budget"})
-                _checar_teto(_minor(orc.get("daily_budget"), conta["moeda"]), conta["moeda"])
+                orc = await _get(c, str(id), {"fields": "daily_budget,lifetime_budget"})
+                diario = _minor(orc.get("daily_budget"), moeda)
+                if orcamento_diario is not None:
+                    if orc.get("lifetime_budget") and not orc.get("daily_budget"):
+                        raise MetaError("O original usa orçamento total, não diário. Duplique sem orcamento_diario e "
+                                        "ajuste com alterar_orcamento(orcamento_total=...). Nada foi criado.")
+                    if tipo == "campaign" and not orc.get("daily_budget"):
+                        raise MetaError("Esta campanha não tem orçamento de campanha: os orçamentos ficam nos conjuntos. "
+                                        "Duplique sem orcamento_diario e ajuste os conjuntos da cópia com "
+                                        "alterar_orcamento. Nada foi criado.")
+                    _checar_teto(orcamento_diario, moeda)
+                elif diario is not None:
+                    _checar_teto(diario, moeda)
+                elif tipo == "campaign":
+                    # Orçamento nos conjuntos: a cópia herda o de cada um, então o teto vale para todos eles.
+                    conjs = await _get_all(c, f"{id}/adsets", {"fields": "daily_budget", "limit": 100})
+                    maior = max((_minor(x.get("daily_budget"), moeda) or 0 for x in conjs), default=0)
+                    _checar_teto(maior or None, moeda)
             chave = {"campaign": "copied_campaign_id", "adset": "copied_adset_id", "ad": "copied_ad_id"}[tipo]
+            pendente = False
             for n in range(1, quantidade + 1):
                 dados: dict = {"status_option": "PAUSED", "rename_options": {"rename_suffix": " - cópia"}}
                 if tipo in ("campaign", "adset"):
@@ -1453,18 +1558,39 @@ async def duplicar(
                     r = await _post(c, f"{id}/copies", dados)
                 except MetaError as e:
                     _registrar("duplicar", str(id), params, False, str(e))
+                    if linhas:
+                        linhas.append(f"ERRO na cópia {n}: {_scrub(str(e))}")
+                        break
                     raise
                 novo = str(r.get(chave) or "")
-                nome_final = None
-                if novo and novo_nome:
-                    nome_final = novo_nome if quantidade == 1 else f"{novo_nome} {n}"
-                    await _post(c, novo, {"name": nome_final})
                 filhos = len(r.get("ad_object_ids") or [])
                 msg = (f"cópia {n} de {_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}) -> ID {novo}"
-                       + (f" '{nome_final}'" if nome_final else "") + (f", {filhos} objetos internos" if filhos else "") + ", PAUSADA")
-                _registrar("duplicar", str(id), params, True, msg)
-                linhas.append("OK " + msg)
-        return f"Cliente: {nome_cliente}\n" + "\n".join(linhas) + "\nPara ativar, use alterar_status com acao='ativar'."
+                       + (f", {filhos} objetos internos" if filhos else "") + ", PAUSADA")
+                problemas = []
+                if novo and novo_nome:
+                    nome_final = novo_nome if quantidade == 1 else f"{novo_nome} {n}"
+                    try:
+                        await _post(c, novo, {"name": nome_final})
+                        msg += f", nome '{nome_final}'"
+                    except MetaError as e:
+                        problemas.append(f"não renomeei ({_scrub(str(e))})")
+                if novo and orcamento_diario is not None:
+                    try:
+                        await _post(c, novo, {"daily_budget": _centavos(orcamento_diario, moeda)})
+                        msg += f", orçamento diário {moeda} {orcamento_diario:,.2f}"
+                    except MetaError as e:
+                        pendente = True
+                        problemas.append(f"o orçamento NÃO foi trocado e a cópia está com o do original "
+                                         f"({moeda} {diario or 0:,.2f}): {_scrub(str(e))}")
+                if problemas:
+                    msg += ". ATENÇÃO: " + "; ".join(problemas)
+                _registrar("duplicar", str(id), params, not problemas, msg)
+                linhas.append(("OK " if not problemas else "PARCIAL ") + msg)
+        fim = "\nPara ativar, use alterar_status com acao='ativar'."
+        if pendente:
+            fim = ("\nAntes de ativar, ajuste o orçamento das cópias marcadas como PARCIAL com alterar_orcamento."
+                   + fim)
+        return f"Cliente: {nome_cliente}\n" + "\n".join(linhas) + fim
     except Exception as e:
         return _tool_error(e)
 

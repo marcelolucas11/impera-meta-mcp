@@ -47,6 +47,9 @@ A ponte do Claude com a Meta é o servidor, não o app: funciona com o app abert
 | 5.0.0 | Permissões de alteração por cliente e 7 ferramentas de escrita; app nativo no Dock (ponto de aberto, uma janela só, fechar = sair); Manter em segundo plano (LaunchAgent). |
 | 5.0.1 | Ícone: o `osacompile` usava o ícone padrão do `Assets.car` (`CFBundleIconName`); agora é a logo. |
 | 5.0.2 | Em Itens de Início de Sessão o segundo plano aparece como Impera Meta MCP (antes "python"): o serviço roda de dentro do `.app`. |
+| 5.0.3 | Métricas de vídeo em `consultar_insights` (`com_video`) e tipo do criativo em `estrutura_conta`. |
+| 5.0.4 | Tipo do ID (campanha/conjunto/anúncio) descoberto sem depender do `metadata` da Meta, que vinha vazio ou com nomes antigos e travava `duplicar` e `alterar_orcamento`. |
+| 5.0.5 | Chave por cliente "Exigir período" (`EXIGIR_PERIODO=1`); `estrutura_conta` com `desde`/`ate` lista só o que veiculou no período (ativo ou pausado, com `gasto_periodo`); `duplicar` com `orcamento_diario` da cópia (teto conferido contra o valor novo) e teto aplicado aos conjuntos de campanha sem orçamento de campanha. |
 
 ## 4. Ferramentas que o Claude tem
 
@@ -57,7 +60,7 @@ Leitura (sempre):
 | `listar_clientes` | Clientes, conta padrão, permissões, teto, pasta de relatórios. Nunca mostra token. |
 | `verificar_conexao` | Testa o token de um cliente ou de todos. |
 | `listar_contas` | Contas que o token enxerga. |
-| `estrutura_conta` | Campanhas/conjuntos/anúncios com orçamento, estratégia, limite de CPA, ROAS mínimo, público. |
+| `estrutura_conta` | Campanhas/conjuntos/anúncios com orçamento, estratégia, limite de CPA, ROAS mínimo, público. Com `desde`/`ate`, só o que veiculou no período (ativo ou pausado), com `gasto_periodo`; sem período, pelo status de agora. |
 | `consultar_insights` | Métricas por nível, por dia ou período, com quebras (idade/gênero, plataforma, posicionamento, dispositivo, região, hora). |
 | `exportar_relatorio` | `.xlsx` com Tabela A (dia x anúncio x idade x gênero), B (dia x anúncio x plataforma), C (sem dia: alcance real do período), conta por dia, estrutura e aba Info com conferência de somas. |
 | `listar_pixels`, `listar_paginas`, `listar_midias`, `buscar_localizacao` | Apoio para montar campanhas. |
@@ -71,6 +74,8 @@ Alteração (só com a permissão ligada para o cliente):
 | `renomear` | `editar` |
 | `duplicar`, `criar_campanha`, `criar_conjunto`, `criar_anuncio` | `criar` |
 
+Análises: com `EXIGIR_PERIODO=1` no cliente, `consultar_insights` e `exportar_relatorio` recusam chamada sem `desde` e `ate`, e a mensagem manda o Claude perguntar o período (ou usar o que o usuário já disse). `estrutura_conta` sem período continua liberada, porque serve para achar IDs antes de alterar.
+
 Garantias da escrita: só na conta padrão do cliente; tudo criado ou duplicado nasce PAUSADO; teto de orçamento diário (`ORCAMENTO_MAX_DIA`) recusado antes de chegar à Meta; registro em `historico/<cliente>.jsonl` (o app mostra); POST nunca repetido às cegas (só quando a Meta recusou antes de processar); nada é apagado. O token precisa de `ads_management` para alterar.
 
 ## 5. Onde ficam as coisas no Mac
@@ -79,7 +84,7 @@ Tudo em `~/meta-ads-mcp`:
 
 | Caminho | Conteúdo | Vai para o GitHub? |
 |---|---|---|
-| `clientes/<id>.env` | Token, conta padrão, evento de compra, permissões, teto (permissão 600) | Nunca |
+| `clientes/<id>.env` | Token, conta padrão, evento de compra, permissões, teto, exigir período (permissão 600) | Nunca |
 | `historico/<id>.jsonl` | Alterações feitas pelo Claude | Nunca |
 | `relatorios/<id>/` | `.xlsx` exportados | Nunca |
 | `.env` | Ajustes gerais (versão da API, pasta de saída, `SEGUNDO_PLANO`) | Nunca |
@@ -100,7 +105,7 @@ Atualização e reinstalação nunca escrevem nos itens marcados "Nunca".
 
 ## 7. O que ainda não foi verificado
 
-- **Alterações contra a Meta de verdade:** as ferramentas de escrita só rodaram contra a simulação. Primeiro teste sugerido: ligar "Criar e duplicar" num cliente e pedir ao Claude para duplicar um conjunto (nasce pausado, não gasta).
+- **Alterações contra a Meta de verdade:** `alterar_status` e `alterar_orcamento` já rodaram na Sort dos Primos (20/10/2026, depois da 5.0.4). `duplicar` com `orcamento_diario`, o filtro por veiculação (`filtering` por `id IN` nos edges campaigns/adsets/ads, com plano B de filtrar localmente) e as ferramentas de criação ainda só rodaram contra a simulação.
 - **Partes que só existem no Mac:** janela nativa, ícone no Dock, segundo plano com nome e logo em Itens de Início de Sessão. O Marcelo confirmou o app rodando e pediu o ícone (5.0.1) e o nome no segundo plano (5.0.2); falta confirmar o resultado da 5.0.2.
 - **"Item de desenvolvedor não identificado":** só some com o app assinado e notarizado com Apple Developer ID (conta paga). Hoje o app é assinado localmente (ad-hoc).
 

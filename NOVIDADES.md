@@ -1,5 +1,12 @@
 # Novidades
 
+## 5.0.5
+
+- **Nova chave "Exigir período nas análises"**, na ficha de cada cliente (seção "O que o Claude pode fazer"). Ligada, o Claude só consulta dados e gera relatórios com a data inicial e a final que você escolheu. Se você não disser o período, ele pergunta antes, em vez de usar sozinho "últimos 7 dias".
+- **Análise só do que veiculou.** Ao puxar a estrutura da conta com um período, o Claude recebe só as campanhas, conjuntos e anúncios que gastaram naquelas datas, inclusive os que foram pausados depois, com o gasto do período e ordenados por gasto. Em contas grandes, a resposta fica muito menor e mais rápida, e para de estourar o limite de chamadas da Meta.
+- **Duplicar com orçamento novo.** Agora dá para dizer o orçamento diário das cópias na hora de duplicar. O teto do cliente é conferido contra esse valor novo, não contra o do original. Assim uma campanha de R$ 6.000 pode virar cópias de R$ 300 sem mexer no teto. As cópias continuam nascendo pausadas.
+- O teto também passa a valer ao duplicar campanha com orçamento nos conjuntos: nenhum conjunto copiado pode passar do teto.
+
 ## 5.0.4
 
 - **Corrige "este ID é desconhecido" / "este ID é de outro tipo"** ao duplicar ou mudar orçamento, limite de CPA e ROAS mínimo, mesmo com o ID certo de campanha ou conjunto. A Meta deixou de informar, em algumas respostas, se o ID é campanha, conjunto ou anúncio (ou informa com nomes antigos). Agora o app descobre o tipo sozinho, consultando o próprio objeto, e duplicar e alterar orçamento voltam a funcionar.

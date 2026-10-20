@@ -111,6 +111,7 @@ def op_estado() -> dict:
             "relatorios": _relatorios(cid),
             "permissoes": server._parse_permissoes(v.get("PERMISSOES")),
             "teto": v.get("ORCAMENTO_MAX_DIA", ""),
+            "exigir_periodo": server._exige_periodo(v.get("EXIGIR_PERIODO")),
         } for cid, v in cs.items()],
         "rotulos_permissoes": server.PERMISSOES,
         "segundo_plano": segundo_plano(),
@@ -234,6 +235,10 @@ def op_config(cid: str, dados: dict) -> dict:
         if bruto and (teto is None or teto <= 0):
             raise Erro("Teto de orçamento inválido. Use um valor como 500 ou 1500,00, ou deixe vazio para sem teto.")
         valores["ORCAMENTO_MAX_DIA"] = "" if teto is None else (f"{teto:.2f}".rstrip("0").rstrip("."))
+    if "exigir_periodo" in dados:
+        if not isinstance(dados["exigir_periodo"], bool):
+            raise Erro("Valor inválido para 'Exigir período'.")
+        valores["EXIGIR_PERIODO"] = "1" if dados["exigir_periodo"] else ""
     if valores:
         configurar.salvar_cliente(cid, valores)
     return {"ok": True}

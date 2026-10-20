@@ -331,7 +331,7 @@ function desenharPermissoes() {
     editar: "Mudar o nome de campanhas, conjuntos e anúncios.", criar: "Criar campanhas, conjuntos e anúncios e duplicar o que já existe. Tudo nasce pausado." };
   const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear", criar: "Criar e duplicar" };
   const t = teste[c.id] || {}, d = t.dados;
-  const r = rascunhos[c.id] || { permissoes: c.permissoes || [], teto: c.teto || "" };
+  const r = rascunhos[c.id] || { permissoes: c.permissoes || [], teto: c.teto || "", exigir_periodo: !!c.exigir_periodo };
   const escrita = r.permissoes.length > 0;
   $("#permissoes").innerHTML = `
     <div class="permissoes">
@@ -339,6 +339,10 @@ function desenharPermissoes() {
         <span><b>Ler dados e relatórios</b><small>Sempre ligado.</small></span></label>
       ${Object.keys(rot).map((k) => `<label class="chave"><input type="checkbox" data-perm="${esc(k)}" ${r.permissoes.includes(k) ? "checked" : ""}>
         <span class="trilho" aria-hidden="true"></span><span><b>${esc(titulos[k] || rot[k])}</b><small>${esc(ajuda[k] || "")}</small></span></label>`).join("")}
+    </div>
+    <div class="permissoes" style="margin-top:12px">
+      <label class="chave"><input type="checkbox" id="chk-periodo" ${r.exigir_periodo ? "checked" : ""}>
+        <span class="trilho" aria-hidden="true"></span><span><b>Exigir período nas análises</b><small>O Claude só consulta dados com data inicial e final escolhidas por você. Se você não disser o período, ele pergunta antes.</small></span></label>
     </div>
     <div class="linha"><label for="teto">Teto de orçamento diário</label><div class="junto">
       <input class="campo" id="teto" style="max-width:180px" inputmode="decimal" placeholder="Sem teto" value="${esc(r.teto)}" autocomplete="off">
@@ -530,8 +534,9 @@ document.addEventListener("click", async (ev) => {
     if (b.id === "btn-permissoes") {
       const permissoes = [...document.querySelectorAll("#permissoes [data-perm]")].filter((x) => x.checked).map((x) => x.dataset.perm);
       const teto = $("#teto").value;
+      const exigir_periodo = !!($("#chk-periodo") && $("#chk-periodo").checked);
       try {
-        await api("POST", `clientes/${atual}/config`, { permissoes, teto });
+        await api("POST", `clientes/${atual}/config`, { permissoes, teto, exigir_periodo });
         delete rascunhos[atual];
         await carregar(); desenharPermissoes(); desenharHistorico();
         msg("#msg-permissoes", permissoes.length ? "Permissões salvas. Valem na hora para o Claude." : "Permissões salvas. O Claude só lê os dados deste cliente.", "ok");
@@ -594,6 +599,7 @@ function guardarRascunho() {
   rascunhos[atual] = {
     permissoes: [...document.querySelectorAll("#permissoes [data-perm]")].filter((x) => x.checked).map((x) => x.dataset.perm),
     teto: $("#teto") ? $("#teto").value : "",
+    exigir_periodo: !!($("#chk-periodo") && $("#chk-periodo").checked),
   };
 }
 document.addEventListener("input", (ev) => { if (ev.target.closest && ev.target.closest("#permissoes")) guardarRascunho(); });
