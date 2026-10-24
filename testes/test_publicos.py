@@ -51,6 +51,7 @@ ARQ_CRU = csv_arquivo("cru.csv", ["email", "phone"], [[f"pessoa{i}@exemplo.com",
 
 POSTS, ESTADO, EXISTENTES = [], {"falha_lote": 0}, [{"id": "6000000000000001", "name": "Compradores antigos"}]
 URLS = []
+ACUM = {}
 
 
 def err(status, code, msg):
@@ -80,7 +81,8 @@ def handler(req):
         if n and json.loads(form["session"])["batch_seq"] == n:
             POSTS.append((p, form, "500")); return err(500, 2, "Service temporarily unavailable")
         POSTS.append((p, form, "ok"))
-        return httpx.Response(200, json={"audience_id": p.split("/")[0], "num_received": len(json.loads(form["payload"])["data"]), "num_invalid_entries": 0})
+        ACUM[p.split("/")[0]] = ACUM.get(p.split("/")[0], 0) + len(json.loads(form["payload"])["data"])  # a Meta real devolve o acumulado da sessão
+        return httpx.Response(200, json={"audience_id": p.split("/")[0], "num_received": ACUM[p.split("/")[0]], "num_invalid_entries": 0})
     POSTS.append((p, form, "ok"))
     novo = f"6000000000{len(POSTS):06d}"
     EXISTENTES.append({"id": novo, "name": form.get("name")})

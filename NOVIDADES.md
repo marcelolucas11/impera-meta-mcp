@@ -3,6 +3,7 @@
 ## 5.1.1
 
 - Corrige `listar_publicos`, que dava erro ao mostrar a data de criação dos públicos (a Meta manda a data como número). Agora lista os públicos da conta com tamanho e status normalmente.
+- Corrige a contagem de linhas no resumo do envio: a Meta informa o total acumulado a cada lote e o app somava os lotes (uma lista de 27.296 linhas aparecia como 57.296). O envio em si já estava certo.
 
 ## 5.1.0
 

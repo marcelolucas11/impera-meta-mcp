@@ -2047,8 +2047,9 @@ async def criar_publico_lista(
                            f"e me diga se quer completar. Detalhe: {e}")
                     _registrar("criar_publico_lista", aud, params, False, msg)
                     raise MetaError(msg, code=e.code)
-                recebidas += int(resp.get("num_received") or len(parte))
-                invalidas_meta += int(resp.get("num_invalid_entries") or 0)
+                # A Meta devolve o total acumulado da sessão em cada lote, não só o do lote.
+                recebidas = max(recebidas, int(resp.get("num_received") or 0), min(len(linhas), (k + 1) * _LOTE_PUBLICO))
+                invalidas_meta = max(invalidas_meta, int(resp.get("num_invalid_entries") or 0))
         msg = (f"OK público '{nome}' ({aud}) criado e {recebidas:,} linhas enviadas em {lotes} lote(s); "
                f"{invalidas_meta:,} entradas inválidas segundo a Meta. Ele leva alguns minutos para processar e mostrar o tamanho: "
                "confira com listar_publicos.")
