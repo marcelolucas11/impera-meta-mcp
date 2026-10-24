@@ -1,5 +1,9 @@
 # Novidades
 
+## 5.1.1
+
+- Corrige `listar_publicos`, que dava erro ao mostrar a data de criação dos públicos (a Meta manda a data como número). Agora lista os públicos da conta com tamanho e status normalmente.
+
 ## 5.1.0
 
 - **Públicos de lista de clientes.** O Claude agora cria um público personalizado a partir de um CSV que está no seu Mac e sobe a lista inteira para a Meta, em lotes de 10.000 linhas, na conta padrão do cliente. É a ferramenta `criar_publico_lista`, liberada pela mesma permissão de "criar e duplicar".

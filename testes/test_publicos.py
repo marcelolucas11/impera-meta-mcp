@@ -69,7 +69,7 @@ def handler(req):
         if p == "act_111111111111111/customaudiences":
             return httpx.Response(200, json={"data": [dict(a, subtype="CUSTOM", approximate_count_lower_bound=1000, approximate_count_upper_bound=1500,
                                                            operation_status={"code": 200, "description": "Normal"},
-                                                           delivery_status={"code": 200, "description": "Pronto"}, time_created="2026-10-24T01:00:00+0000")
+                                                           delivery_status={"code": 200, "description": "Pronto"}, time_created=1792800000)
                                              for a in EXISTENTES]})
         return err(400, 100, f"Unsupported get request {p}")
     corpo = req.content.decode()
@@ -155,7 +155,8 @@ async def main():
           and "parou no lote 2 de 3" in out and "3 linhas" in out and "Não repeti nada" in out, out[:200])
 
     out = await server.listar_publicos(cliente="primos")
-    check("listar_publicos: tamanho e status", "Compradores antigos" in out and "1000" in out and "Pronto" in out and not out.startswith("ERRO"), out.splitlines()[0][:100])
+    check("listar_publicos: tamanho e status (data Unix como a Meta manda)", "Compradores antigos" in out and "1000" in out and "Pronto" in out and not out.startswith("ERRO"), out.splitlines()[0][:100])
+    check("data em texto ISO também funciona", server._data_meta("2026-10-24T01:00:00+0000") == "2026-10-24T01:00" and server._data_meta(None) == "" and server._data_meta("1792800000").startswith("2026-"))
 
     tudo = "\n".join((tmp / "historico" / a).read_text() for a in os.listdir(tmp / "historico"))
     check("histórico: sem token, sem hashes, com as falhas", TOKEN not in tudo and h("e0") not in tudo and '"ok": false' in tudo and "Todos os clientes" in tudo)

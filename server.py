@@ -2058,6 +2058,16 @@ async def criar_publico_lista(
         return _tool_error(e)
 
 
+def _data_meta(v: Any) -> str:
+    """A Meta devolve datas ora como texto ISO, ora como número (segundos Unix)."""
+    if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()):
+        try:
+            return datetime.fromtimestamp(int(v)).strftime("%Y-%m-%d %H:%M")
+        except (OverflowError, OSError, ValueError):
+            return str(v)
+    return str(v or "")[:16]
+
+
 @mcp.tool(annotations=_RO)
 async def listar_publicos(cliente: _CLIENTE = None) -> str:
     """Públicos personalizados da conta padrão do cliente, com tamanho aproximado e status (para conferir um upload de lista)."""
@@ -2072,7 +2082,7 @@ async def listar_publicos(cliente: _CLIENTE = None) -> str:
                    "tamanho_min": r.get("approximate_count_lower_bound"), "tamanho_max": r.get("approximate_count_upper_bound"),
                    "processamento": (r.get("operation_status") or {}).get("description"),
                    "entrega": (r.get("delivery_status") or {}).get("description"),
-                   "criado": (r.get("time_created") or "")[:16]} for r in rows]
+                   "criado": _data_meta(r.get("time_created"))} for r in rows]
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} público(s)\n" + _csv(
             linhas, ["id", "nome", "tipo", "tamanho_min", "tamanho_max", "processamento", "entrega", "criado"])
     except Exception as e:
