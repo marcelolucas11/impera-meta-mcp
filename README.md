@@ -96,6 +96,7 @@ Leitura (sempre disponível):
 | `consultar_insights` | Métricas por conta, campanha, conjunto ou anúncio; por dia ou no período; com quebra por idade/gênero, plataforma, posicionamento, dispositivo, região ou hora. |
 | `exportar_relatorio` | Gera o `.xlsx` com as Tabelas A, B e C do prompt v4, conta por dia e estrutura. |
 | `listar_pixels`, `listar_paginas`, `listar_midias`, `buscar_localizacao` | Pixels, páginas e Instagram, imagens e vídeos da conta, e chaves de cidades/estados para segmentação. |
+| `listar_publicos` | Públicos personalizados da conta, com tamanho aproximado e status. |
 
 Alteração (só com a permissão ligada no app para aquele cliente):
 
@@ -106,6 +107,7 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `renomear` | Renomear | Muda o nome de campanha, conjunto ou anúncio. |
 | `duplicar` | Criar e duplicar | Copia campanha (com conjuntos e anúncios), conjunto (com anúncios) ou anúncio. Cópias pausadas. |
 | `criar_campanha` | Criar e duplicar | Campanha pausada, com orçamento na campanha ou nos conjuntos. |
+| `criar_publico_lista` | Criar e duplicar | Público personalizado a partir de um CSV (com hash SHA-256) do Mac, enviado em lotes; aceita coluna `value` e simulação. |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 

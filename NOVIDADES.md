@@ -1,5 +1,15 @@
 # Novidades
 
+## 5.1.0
+
+- **Públicos de lista de clientes.** O Claude agora cria um público personalizado a partir de um CSV que está no seu Mac e sobe a lista inteira para a Meta, em lotes de 10.000 linhas, na conta padrão do cliente. É a ferramenta `criar_publico_lista`, liberada pela mesma permissão de "criar e duplicar".
+- O CSV precisa estar com hash SHA-256 (colunas email, phone, fn, ln, ct, st, country, doby, dobm, dobd). Nada em texto puro sai do Mac, e arquivo sem hash é recusado antes de enviar qualquer coisa.
+- **Público baseado em valor.** Se o CSV tem uma coluna `value`, o público é criado baseado em valor e cada linha leva o seu valor, para criar uma Semelhante melhor.
+- Antes de enviar, dá para pedir uma **simulação**: o Claude confere o arquivo e mostra quantas linhas serão enviadas, quantas foram descartadas (repetidas, sem email/telefone) e quantos lotes serão.
+- Se já existir um público com o mesmo nome, nada é criado. Se o envio parar no meio, o Claude não repete sozinho e diz quantas linhas a Meta já aceitou.
+- Nova leitura `listar_publicos`: mostra os públicos da conta com tamanho aproximado e status de processamento.
+- Nenhuma ferramenta apaga público. Tudo fica no histórico em "Alterações feitas pelo Claude", sem gravar os dados da lista.
+
 ## 5.0.5
 
 - **Nova chave "Exigir período nas análises"**, na ficha de cada cliente (seção "O que o Claude pode fazer"). Ligada, o Claude só consulta dados e gera relatórios com a data inicial e a final que você escolheu. Se você não disser o período, ele pergunta antes, em vez de usar sozinho "últimos 7 dias".

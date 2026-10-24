@@ -50,6 +50,7 @@ A ponte do Claude com a Meta é o servidor, não o app: funciona com o app abert
 | 5.0.3 | Métricas de vídeo em `consultar_insights` (`com_video`) e tipo do criativo em `estrutura_conta`. |
 | 5.0.4 | Tipo do ID (campanha/conjunto/anúncio) descoberto sem depender do `metadata` da Meta, que vinha vazio ou com nomes antigos e travava `duplicar` e `alterar_orcamento`. |
 | 5.0.5 | Chave por cliente "Exigir período" (`EXIGIR_PERIODO=1`); `estrutura_conta` com `desde`/`ate` lista só o que veiculou no período (ativo ou pausado, com `gasto_periodo`); `duplicar` com `orcamento_diario` da cópia (teto conferido contra o valor novo) e teto aplicado aos conjuntos de campanha sem orçamento de campanha. |
+| 5.1.0 | `criar_publico_lista` (CSV com hash SHA-256 do Mac vira público personalizado, em lotes de 10.000, com valor opcional e simulação) e `listar_publicos`. |
 
 ## 4. Ferramentas que o Claude tem
 
@@ -64,6 +65,7 @@ Leitura (sempre):
 | `consultar_insights` | Métricas por nível, por dia ou período, com quebras (idade/gênero, plataforma, posicionamento, dispositivo, região, hora). |
 | `exportar_relatorio` | `.xlsx` com Tabela A (dia x anúncio x idade x gênero), B (dia x anúncio x plataforma), C (sem dia: alcance real do período), conta por dia, estrutura e aba Info com conferência de somas. |
 | `listar_pixels`, `listar_paginas`, `listar_midias`, `buscar_localizacao` | Apoio para montar campanhas. |
+| `listar_publicos` | Públicos personalizados da conta (tamanho e status). |
 
 Alteração (só com a permissão ligada para o cliente):
 
@@ -72,7 +74,7 @@ Alteração (só com a permissão ligada para o cliente):
 | `alterar_status` | `status` |
 | `alterar_orcamento` (orçamento, limite de CPA, ROAS mínimo) | `orcamento` |
 | `renomear` | `editar` |
-| `duplicar`, `criar_campanha`, `criar_conjunto`, `criar_anuncio` | `criar` |
+| `duplicar`, `criar_campanha`, `criar_conjunto`, `criar_anuncio`, `criar_publico_lista` | `criar` |
 
 Análises: com `EXIGIR_PERIODO=1` no cliente, `consultar_insights` e `exportar_relatorio` recusam chamada sem `desde` e `ate`, e a mensagem manda o Claude perguntar o período (ou usar o que o usuário já disse). `estrutura_conta` sem período continua liberada, porque serve para achar IDs antes de alterar.
 

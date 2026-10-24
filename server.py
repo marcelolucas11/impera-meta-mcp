@@ -6,7 +6,7 @@ deste script. O token vai apenas no cabeçalho Authorization das chamadas à Gra
 API: nunca aparece em URL, log ou resposta de ferramenta. Uma chamada usa somente
 o token do cliente pedido; não existe token "global" que sirva de reserva.
 
-Leitura sempre. Escrita (ativar/pausar, orçamento, renomear, criar, duplicar) só
+Leitura sempre. Escrita (ativar/pausar, orçamento, renomear, criar, duplicar, públicos de lista) só
 quando o cliente tem a permissão ligada no app, só na conta padrão do cliente,
 com tudo criado PAUSADO, respeitando o teto de orçamento diário e com registro
 de cada ação em historico/<cliente>.jsonl. Nada é apagado.
@@ -1902,6 +1902,182 @@ async def buscar_localizacao(
         return f"Cliente: {nome_cliente} | {len(linhas)} resultado(s) para '{termo}'\n" + _csv(linhas, ["chave", "nome", "estado", "pais"])
     except Exception as e:
         return _tool_error(e)
+
+
+# ───────────────────────── públicos de lista de clientes ─────────────────────────
+
+_PUBLICO_CHAVES = {"email": "EMAIL", "phone": "PHONE", "fn": "FN", "ln": "LN", "ct": "CT", "st": "ST",
+                   "country": "COUNTRY", "zip": "ZIP", "gen": "GEN", "doby": "DOBY", "dobm": "DOBM",
+                   "dobd": "DOBD", "madid": "MADID"}
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_LOTE_PUBLICO = 10_000  # máximo de linhas por envio à Meta
+_LISTA_MAX_BYTES = 500 * 1024 * 1024
+
+
+def _ler_lista(arquivo: str) -> dict:
+    """Lê um CSV de clientes já com hash SHA-256 (colunas email, phone, fn, ln, ct, st, country, doby,
+    dobm, dobd e, opcional, value). Descarta linhas sem identificador, repetidas ou fora do formato."""
+    p = Path(arquivo).expanduser()
+    if p.suffix.lower() != ".csv" or not p.is_file():
+        raise MetaError("arquivo_csv precisa ser um arquivo .csv existente neste Mac (caminho completo).")
+    if p.stat().st_size > _LISTA_MAX_BYTES:
+        raise MetaError("O arquivo passa de 500 MB. Divida a lista em partes.")
+    with p.open(newline="", encoding="utf-8-sig") as f:
+        leitor = csv.reader(f)
+        try:
+            cab = [h.strip().lower() for h in next(leitor)]
+        except StopIteration:
+            raise MetaError("O arquivo está vazio.")
+        colunas = [(i, _PUBLICO_CHAVES[h]) for i, h in enumerate(cab) if h in _PUBLICO_CHAVES]
+        idx_valor = next((i for i, h in enumerate(cab) if h in ("value", "valor")), None)
+        if not any(s in ("EMAIL", "PHONE", "MADID") for _, s in colunas):
+            raise MetaError("O CSV precisa de pelo menos uma coluna email, phone ou madid (cabeçalho na primeira linha). "
+                            f"Colunas encontradas: {', '.join(cab[:12])}.")
+        idx_id = [k for k, (_, s) in enumerate(colunas) if s in ("EMAIL", "PHONE", "MADID")]
+        linhas, vistos = [], set()
+        sem_id = invalidas = repetidas = 0
+        soma = 0.0
+        for row in leitor:
+            if not row:
+                continue
+            vals = [(row[i].strip().lower() if i < len(row) else "") for i, _ in colunas]
+            if any(v and not _SHA256.fullmatch(v) for v in vals):
+                invalidas += 1
+                continue
+            if not any(vals[k] for k in idx_id):
+                sem_id += 1
+                continue
+            chave = tuple(vals[k] for k in idx_id)
+            if chave in vistos:
+                repetidas += 1
+                continue
+            vistos.add(chave)
+            if idx_valor is not None:
+                bruto = row[idx_valor].strip() if idx_valor < len(row) else ""
+                valor = _numero(bruto)
+                if valor is None or valor < 0:
+                    invalidas += 1
+                    continue
+                soma += valor
+                vals.append(f"{valor:.2f}")
+            linhas.append(vals)
+    total = len(linhas) + sem_id + invalidas + repetidas
+    if invalidas and invalidas > max(5, total * 0.05):
+        raise MetaError(f"{invalidas} de {total} linhas têm valores que não são SHA-256 (64 caracteres hexadecimais). "
+                        "O arquivo parece não estar com hash. Nada foi enviado.")
+    if not linhas:
+        raise MetaError("Nenhuma linha utilizável no arquivo (todas sem email/telefone ou fora do formato).")
+    schema = [s for _, s in colunas] + (["LOOKALIKE_VALUE"] if idx_valor is not None else [])
+    return {"schema": schema, "linhas": linhas, "lidas": total, "sem_id": sem_id, "invalidas": invalidas,
+            "repetidas": repetidas, "soma_valor": soma if idx_valor is not None else None,
+            "com_valor": idx_valor is not None, "arquivo": p.name}
+
+
+def _resumo_lista(lista: dict) -> str:
+    n = len(lista["linhas"])
+    s = lista["schema"]
+    cobertura = ", ".join(f"{c} {sum(1 for l in lista['linhas'] if l[k]) :,}" for k, c in enumerate(s) if c in ("EMAIL", "PHONE"))
+    txt = (f"Arquivo {lista['arquivo']}: {lista['lidas']:,} linhas lidas, {n:,} utilizáveis"
+           f" (descartadas: {lista['sem_id']:,} sem email/telefone, {lista['repetidas']:,} repetidas, {lista['invalidas']:,} fora do formato).\n"
+           f"Colunas enviadas: {', '.join(s)}. Preenchimento: {cobertura}.")
+    if lista["com_valor"]:
+        txt += f"\nValor total da lista: {lista['soma_valor']:,.2f}."
+    return txt
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_publico_lista(
+    nome: Annotated[str, Field(description="Nome do público personalizado (lista de clientes).", min_length=1, max_length=200)],
+    arquivo_csv: Annotated[str, Field(description="Caminho completo do CSV neste Mac. Colunas já com hash SHA-256: email, phone, fn, ln, ct, st, country, doby, dobm, dobd e, opcional, value.")],
+    descricao: Annotated[Optional[str], Field(description="Descrição do público.", max_length=500)] = None,
+    baseado_em_valor: Annotated[Optional[bool], Field(description="Público baseado em valor (usa a coluna value). Vazio: ligado se o CSV tem coluna value ou valor.")] = None,
+    simular: Annotated[bool, Field(description="True: só confere o arquivo e mostra o que seria enviado, sem criar nada na Meta.")] = False,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um público personalizado de lista de clientes na conta padrão do cliente e envia o CSV em lotes de
+    10.000 linhas. Exige a permissão 'criar e duplicar'. O arquivo precisa estar com hash SHA-256 (nada em texto
+    puro sai do Mac). Se já existir público com o mesmo nome, recusa. Use simular=True antes para conferir."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        lista = await asyncio.to_thread(_ler_lista, arquivo_csv)
+        usar_valor = lista["com_valor"] if baseado_em_valor is None else baseado_em_valor
+        if usar_valor and not lista["com_valor"]:
+            raise MetaError("baseado_em_valor exige uma coluna value (ou valor) no CSV.")
+        if not usar_valor and lista["com_valor"]:
+            lista["schema"] = lista["schema"][:-1]
+            lista["linhas"] = [l[:-1] for l in lista["linhas"]]
+        linhas, schema = lista["linhas"], lista["schema"]
+        lotes = (len(linhas) + _LOTE_PUBLICO - 1) // _LOTE_PUBLICO
+        resumo = _resumo_lista(lista)
+        params = {"nome": nome, "arquivo": lista["arquivo"], "linhas": len(linhas), "lotes": lotes,
+                  "baseado_em_valor": usar_valor, "descricao": descricao}
+        if simular:
+            return f"SIMULAÇÃO, nada foi enviado à Meta. Cliente: {nome_cliente}\n{resumo}\nSeriam {lotes} lote(s) de até {_LOTE_PUBLICO:,} linhas."
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            existentes = await _get_all(c, f"{conta['act']}/customaudiences", {"fields": "id,name", "limit": 200})
+            igual = next((a for a in existentes if str(a.get("name", "")).strip().lower() == nome.strip().lower()), None)
+            if igual:
+                raise MetaError(f"Já existe um público chamado '{igual.get('name')}' ({igual.get('id')}) nesta conta. "
+                                "Nada foi criado nem enviado. Escolha outro nome.")
+            try:
+                r = await _post(c, f"{conta['act']}/customaudiences",
+                                {"name": nome, "subtype": "CUSTOM", "description": descricao,
+                                 "customer_file_source": "USER_PROVIDED_ONLY",
+                                 "is_value_based": True if usar_valor else None})
+            except MetaError as e:
+                _registrar("criar_publico_lista", conta["act"], params, False, str(e))
+                if "terms" in str(e).lower() or "termos" in str(e).lower():
+                    raise MetaError(f"{e} É preciso aceitar os Termos de Públicos Personalizados da conta no Gerenciador de Anúncios.", code=e.code)
+                raise
+            aud = str(r.get("id"))
+            sessao = int.from_bytes(os.urandom(6), "big")
+            recebidas = invalidas_meta = 0
+            for k in range(lotes):
+                parte = linhas[k * _LOTE_PUBLICO:(k + 1) * _LOTE_PUBLICO]
+                try:
+                    resp = await _post(c, f"{aud}/users", {
+                        "payload": {"schema": schema, "data": parte},
+                        "session": {"session_id": sessao, "batch_seq": k + 1, "last_batch_flag": k == lotes - 1,
+                                    "estimated_num_total": len(linhas)}})
+                except MetaError as e:
+                    msg = (f"O público '{nome}' ({aud}) foi criado, mas o envio parou no lote {k + 1} de {lotes}. "
+                           f"A Meta aceitou {recebidas:,} linhas antes disso. Não repeti nada: confira com listar_publicos "
+                           f"e me diga se quer completar. Detalhe: {e}")
+                    _registrar("criar_publico_lista", aud, params, False, msg)
+                    raise MetaError(msg, code=e.code)
+                recebidas += int(resp.get("num_received") or len(parte))
+                invalidas_meta += int(resp.get("num_invalid_entries") or 0)
+        msg = (f"OK público '{nome}' ({aud}) criado e {recebidas:,} linhas enviadas em {lotes} lote(s); "
+               f"{invalidas_meta:,} entradas inválidas segundo a Meta. Ele leva alguns minutos para processar e mostrar o tamanho: "
+               "confira com listar_publicos.")
+        _registrar("criar_publico_lista", aud, params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{resumo}\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_publicos(cliente: _CLIENTE = None) -> str:
+    """Públicos personalizados da conta padrão do cliente, com tamanho aproximado e status (para conferir um upload de lista)."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/customaudiences", {
+                "fields": "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,operation_status,delivery_status,time_created",
+                "limit": 100})
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "tipo": r.get("subtype"),
+                   "tamanho_min": r.get("approximate_count_lower_bound"), "tamanho_max": r.get("approximate_count_upper_bound"),
+                   "processamento": (r.get("operation_status") or {}).get("description"),
+                   "entrega": (r.get("delivery_status") or {}).get("description"),
+                   "criado": (r.get("time_created") or "")[:16]} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} público(s)\n" + _csv(
+            linhas, ["id", "nome", "tipo", "tamanho_min", "tamanho_max", "processamento", "entrega", "criado"])
+    except Exception as e:
+        return _tool_error(e)
+
 
 
 def main() -> None:
