@@ -1,5 +1,14 @@
 # Novidades
 
+## 6.3.0
+
+- **Mais de uma conta de anúncios por cliente.** Na ficha do cliente, em Conexão, aparece "Outras contas liberadas": marque as contas que o Claude também pode usar além da padrão (por exemplo a CA 02 do mesmo cliente). A lista usa as contas que o token enxerga.
+- **Como o Claude usa:** as ferramentas de criação e de apoio (campanha, conjunto, anúncio, criativo, vídeo, públicos, pixels, páginas, mídias, conversões, catálogos, diagnósticos) ganharam o campo `conta`. Sem ele, continua valendo a conta padrão. Para criar na CA 02, o Claude passa o ID dela.
+- **Alterar algo que já existe** (ativar/pausar, orçamento, renomear, duplicar, editar) funciona direto pelo ID: se o item for de uma conta liberada, é aceito, sem precisar informar a conta.
+- **Segurança igual à anterior:** conta não marcada é recusada antes de enviar qualquer coisa à Meta, o nome da conta não vale para alterar (só o ID numérico), tudo continua nascendo PAUSADO, o teto diário e as permissões do cliente valem para todas as contas liberadas, e o histórico agora anota em qual conta cada alteração foi feita.
+- `listar_clientes` ganhou a coluna `contas_liberadas` e `verificar_conexao` lista as extras. As leituras de relatório e insights já aceitavam qualquer conta que o token enxerga e não mudaram.
+- Testado só contra Meta simulada. Para usar: atualize pelo app, marque a conta na ficha do cliente e reinicie o Claude (Cmd+Q).
+
 ## 6.2.0
 
 - **Catálogos (só leitura):** `listar_catalogos`, `listar_conjuntos_produtos`, `listar_produtos` (com preço, estoque e se a Meta aprovou) e `diagnosticar_catalogo`, que mostra os feeds, a última carga (itens aceitos, inválidos, erros) e os problemas que a Meta aponta. Só vale para catálogos ligados à conta padrão do cliente.

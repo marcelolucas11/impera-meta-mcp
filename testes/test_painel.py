@@ -67,6 +67,13 @@ with sync_playwright() as p:
     expect(pg.locator("#msg-conexao")).to_contain_text("Conta padrão salva"); expect(pg.locator(".numeros")).to_be_visible(timeout=15000)
     check("conta padrão escolhida na lista e gravada", "META_AD_ACCOUNT_ID=687018494504975" in (tmp / "clientes/dona-co.env").read_text() and "DONA CO BM01 CA 02" in pg.locator(".bilhete[aria-current=true] .conta").inner_text())
 
+    outra = pg.locator("[data-conta-lib]").first
+    expect(outra).to_be_visible()
+    check("ficha lista as outras contas para liberar (sem repetir a padrão)", pg.locator("[data-conta-lib=\"687018494504975\"]").count() == 0 and pg.locator("[data-conta-lib]").count() >= 1)
+    id_outra = outra.get_attribute("data-conta-lib"); outra.check(force=True)
+    expect(pg.locator("#msg-conexao")).to_contain_text("Contas liberadas salvas")
+    check("conta marcada na ficha é gravada no arquivo do cliente", f"CONTAS_LIBERADAS={id_outra}" in (tmp / "clientes/dona-co.env").read_text())
+
     pg.click("#btn-novo"); pg.fill("#nome", "Cliente Ruim"); pg.fill("#token", "TOKRUIM"); pg.click("#btn-salvar")
     expect(pg.locator("#estado")).to_have_text("Com erro", timeout=15000)
     check("token recusado pela Meta: erro legível, sem o token", "recusou o token do cliente 'cliente-ruim'" in pg.locator("#erro-teste").inner_text() and "TOKRUIM" not in pg.content())

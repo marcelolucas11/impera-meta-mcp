@@ -64,8 +64,9 @@ log = logging.getLogger("meta-ads-mcp")
 # arquivo do cliente ativo: é isso que impede usar o token de um na conta de outro.
 _POR_CLIENTE = {"META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_BUSINESS_ID",
                 "META_PURCHASE_ACTION", "META_APP_SECRET", "NOME", "PERMISSOES", "ORCAMENTO_MAX_DIA",
-                "EXIGIR_PERIODO"}
+                "EXIGIR_PERIODO", "CONTAS_LIBERADAS"}
 _ATIVO: contextvars.ContextVar = contextvars.ContextVar("cliente_ativo", default=None)
+_CONTA_USADA: contextvars.ContextVar = contextvars.ContextVar("conta_usada", default="")  # conta da alteração em curso, para o histórico
 
 
 def _read_env(path: Path) -> dict:
@@ -136,6 +137,7 @@ def _usar_cliente(cliente: Optional[str]) -> str:
                                 + ". Configurados: " + ", ".join(cs) + ".")
             nome = hits[0]
     _ATIVO.set(dict(cs[nome], _id=nome))
+    _CONTA_USADA.set("")
     return nome
 
 
@@ -811,11 +813,25 @@ _CLIENTE = Annotated[Optional[str], Field(
     description="Nome do cliente configurado (veja listar_clientes). Obrigatório quando há mais de um.")]
 
 
+_CONTA = Annotated[Optional[str], Field(
+    description="ID numérico de outra conta de anúncios liberada para este cliente no app (veja listar_clientes, "
+                "coluna contas_liberadas). Vazio: usa a conta padrão.")]
+
+
 def _tool_error(e: Exception) -> str:
     if isinstance(e, MetaError):
         return f"ERRO: {_scrub(str(e))}"
     log.exception("erro inesperado")
     return f"ERRO inesperado ({type(e).__name__}): {_scrub(str(e))}"
+
+
+def _liberadas_de(v: dict) -> list:
+    out: list = []
+    for x in [v.get("META_AD_ACCOUNT_ID", "")] + re.split(r"[,;\s]+", v.get("CONTAS_LIBERADAS", "") or ""):
+        d = _so_digitos(x)
+        if d and d not in out:
+            out.append(d)
+    return out
 
 
 @mcp.tool(annotations=_RO)
@@ -830,12 +846,13 @@ async def listar_clientes() -> str:
         raiz = Path(base).expanduser() if base else BASE_DIR / "relatorios"
         rows = [{
             "cliente": n, "nome": v.get("NOME") or n, "conta_padrao": v.get("META_AD_ACCOUNT_ID") or "",
+            "contas_liberadas": ",".join(_liberadas_de(v)),
             "evento_compra": v.get("META_PURCHASE_ACTION") or "auto", "pasta_relatorios": str(raiz / n),
             "permissoes": "ler" + "".join("+" + x for x in _parse_permissoes(v.get("PERMISSOES"))),
             "teto_orcamento_dia": v.get("ORCAMENTO_MAX_DIA") or "",
             "exige_periodo": "sim" if _exige_periodo(v.get("EXIGIR_PERIODO")) else "não",
         } for n, v in cs.items()]
-        return f"{len(rows)} cliente(s):\n" + _csv(rows, ["cliente", "nome", "conta_padrao", "evento_compra", "permissoes",
+        return f"{len(rows)} cliente(s):\n" + _csv(rows, ["cliente", "nome", "conta_padrao", "contas_liberadas", "evento_compra", "permissoes",
                                                          "teto_orcamento_dia", "exige_periodo", "pasta_relatorios"])
     except Exception as e:
         return _tool_error(e)
@@ -867,6 +884,9 @@ async def _verificar_um() -> str:
                           "ads_management. Alterações vão falhar até gerar um token com essa permissão.")
     linhas.append("Permissões no app: ler" + "".join(f", {PERMISSOES[x]}" for x in _parse_permissoes(_cfg("PERMISSOES"))) + ".")
     linhas.append(f"Conta padrão: {_cfg('META_AD_ACCOUNT_ID') or 'não definida'}.")
+    extras = [x for x in _contas_liberadas() if x != _so_digitos(_cfg("META_AD_ACCOUNT_ID"))]
+    if extras:
+        linhas.append("Outras contas liberadas para alterar (use o parâmetro 'conta'): " + ", ".join(extras) + ".")
     if _exige_periodo():
         linhas.append("Exigir período: ligado. Consultas e relatórios só rodam com data inicial e final informadas.")
     acao = _cfg("META_PURCHASE_ACTION")
@@ -1246,9 +1266,11 @@ def _registrar(ferramenta: str, alvo: str, parametros: dict, ok: bool, resultado
         arq = HISTORICO_DIR / f"{_cliente_id() or 'padrao'}.jsonl"
         limpos = {k: (v if not isinstance(v, str) or len(v) < 400 else v[:400] + "…")
                   for k, v in parametros.items() if v not in (None, "", [], {}) and k != "bytes"}
-        linha = json.dumps({"quando": datetime.now().isoformat(timespec="seconds"), "ferramenta": ferramenta,
-                            "alvo": alvo, "parametros": limpos, "ok": ok, "resultado": resultado[:600]},
-                           ensure_ascii=False)
+        reg = {"quando": datetime.now().isoformat(timespec="seconds"), "ferramenta": ferramenta,
+               "alvo": alvo, "parametros": limpos, "ok": ok, "resultado": resultado[:600]}
+        if _CONTA_USADA.get():
+            reg["conta"] = _CONTA_USADA.get()
+        linha = json.dumps(reg, ensure_ascii=False)
         fd = os.open(str(arq), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(_scrub(linha) + "\n")
@@ -1329,24 +1351,54 @@ async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = 
     raise MetaError("Falha inesperada ao enviar para a Meta.")
 
 
-async def _conta_padrao(c: httpx.AsyncClient) -> dict:
-    conta = re.sub(r"\D", "", _cfg("META_AD_ACCOUNT_ID"))
-    if not conta:
-        raise MetaError(f"O cliente '{_cliente_id()}' não tem conta padrão. Alterações só são feitas na conta "
-                        "padrão: escolha uma na ficha do cliente no app.")
-    info = await _get(c, f"act_{conta}", {"fields": "account_id,name,currency"})
-    return {"id": conta, "act": f"act_{conta}", "nome": info.get("name") or conta, "moeda": info.get("currency") or "BRL"}
+def _so_digitos(v: Any) -> str:
+    return re.sub(r"\D", "", str(v or ""))
+
+
+def _contas_liberadas() -> list:
+    """IDs das contas onde o Claude pode alterar para o cliente ativo: a conta padrão primeiro,
+    depois as marcadas em CONTAS_LIBERADAS no app. Qualquer outra conta é recusada."""
+    out: list = []
+    for x in [_cfg("META_AD_ACCOUNT_ID")] + re.split(r"[,;\s]+", _cfg("CONTAS_LIBERADAS")):
+        d = _so_digitos(x)
+        if d and d not in out:
+            out.append(d)
+    return out
+
+
+async def _conta_padrao(c: httpx.AsyncClient, conta: Optional[str] = None) -> dict:
+    """Conta onde a ferramenta vai trabalhar: a padrão do cliente ou, se informada em 'conta', outra
+    que o cliente tenha liberado no app. Nunca uma conta fora da lista."""
+    liberadas = _contas_liberadas()
+    texto = (conta or "").strip()
+    if texto and not re.fullmatch(r"(act_)?\d{6,}", texto):
+        raise MetaError("Para trabalhar em outra conta, passe o ID numérico dela em 'conta' (veja listar_contas). "
+                        "Nomes só valem nas consultas de leitura.")
+    alvo = _so_digitos(texto) or _so_digitos(_cfg("META_AD_ACCOUNT_ID"))
+    if not alvo:
+        raise MetaError(f"O cliente '{_cliente_id()}' não tem conta padrão. Alterações só são feitas nas contas "
+                        "liberadas: escolha a padrão na ficha do cliente no app.")
+    if alvo not in liberadas:
+        raise MetaError(f"A conta {alvo} não está liberada para alterações no cliente '{_cliente_id()}'. "
+                        "Contas liberadas: " + (", ".join(liberadas) or "nenhuma")
+                        + ". Para liberar, marque-a na ficha do cliente no app. Nada foi alterado.")
+    info = await _get(c, f"act_{alvo}", {"fields": "account_id,name,currency"})
+    _CONTA_USADA.set(alvo)
+    return {"id": alvo, "act": f"act_{alvo}", "nome": info.get("name") or alvo, "moeda": info.get("currency") or "BRL"}
 
 
 async def _objeto(c: httpx.AsyncClient, obj_id: str, campos: str = "") -> tuple:
-    """Lê o objeto, descobre o tipo e garante que ele é da conta padrão do cliente."""
+    """Lê o objeto, descobre o tipo e garante que ele é de uma conta liberada do cliente."""
     if not re.fullmatch(r"\d{5,25}", str(obj_id)):
         raise MetaError(f"ID inválido: {obj_id!r}.")
-    conta = await _conta_padrao(c)
     obj = await _get(c, str(obj_id), {"fields": ",".join(x for x in ("account_id,name", campos) if x), "metadata": "1"})
-    if str(obj.get("account_id")) != conta["id"]:
-        raise MetaError(f"O objeto {obj_id} é da conta {obj.get('account_id')}, não da conta padrão do cliente "
-                        f"'{_cliente_id()}' ({conta['nome']}, {conta['id']}). Nada foi alterado.")
+    dono = _so_digitos(obj.get("account_id"))
+    if dono not in _contas_liberadas():
+        padrao = await _conta_padrao(c)
+        raise MetaError(f"O objeto {obj_id} é da conta {obj.get('account_id')}, que não é a conta padrão do cliente "
+                        f"'{_cliente_id()}' ({padrao['nome']}, {padrao['id']}) nem uma conta liberada "
+                        "(não da conta padrão ou das liberadas). Nada foi alterado.")
+    conta = await _conta_padrao(c, dono)
     tipo = await _descobrir_tipo(c, str(obj_id), obj)
     return obj, tipo, conta
 
@@ -1770,6 +1822,7 @@ async def criar_campanha(
         description="Países onde a categoria especial vale (ex.: ['BR']). Obrigatório com categorias_especiais; todo país "
                     "segmentado nos conjuntos precisa estar aqui.")] = [],
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria uma campanha PAUSADA na conta padrão do cliente: objetivo, orçamento diário ou total (CBO), estratégia de lance,
     limite de gasto, datas e categoria especial de anúncio. Exige a permissão 'criar e duplicar'. Depois crie os
@@ -1794,7 +1847,7 @@ async def criar_campanha(
                   "data_fim": data_fim, "categorias_especiais": categorias_especiais,
                   "paises_categoria_especial": paises_categoria_especial}
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             moeda = conta["moeda"]
             _checar_teto(orcamento_diario, moeda)
             if orcamento_total is not None:
@@ -2188,6 +2241,7 @@ async def criar_criativo(
     post_id: Annotated[Optional[str], Field(description="Usar um post existente da página (<id da página>_<id do post>).")] = None,
     post_instagram_id: Annotated[Optional[str], Field(description="Usar um post orgânico do Instagram (id de listar_posts_instagram).")] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria só o criativo (sem anúncio) na conta padrão do cliente, para reaproveitar em vários anúncios: imagem ou vídeo
     único, carrossel, post da página ou post do Instagram. Exige a permissão 'criar e duplicar'. Use o ID devolvido em
@@ -2200,7 +2254,7 @@ async def criar_criativo(
                       video_id=video_id, cta=cta, parametros_url=parametros_url, cartoes=len(cartoes) if cartoes else None,
                       post_id=post_id, post_instagram_id=post_instagram_id)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             try:
                 criativo = await _spec_criativo(c, conta, nome=nome, pagina_id=pagina_id, instagram_id=instagram_id, link=link,
                                                 texto=texto, titulo=titulo, descricao=descricao, imagem_hash=imagem_hash,
@@ -2225,6 +2279,7 @@ async def enviar_video(
     url: Annotated[Optional[str], Field(description="Endereço https público do arquivo de vídeo (a Meta baixa sozinha).")] = None,
     arquivo: Annotated[Optional[str], Field(description="Caminho completo de um vídeo .mp4 ou .mov neste Mac (até 4 GB; enviado em pedaços).")] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Envia um vídeo para a biblioteca da conta padrão do cliente, a partir de um link https ou de um arquivo neste Mac.
     Exige a permissão 'criar e duplicar'. A Meta processa o vídeo depois do envio: confira com listar_midias (tipo
@@ -2248,7 +2303,7 @@ async def enviar_video(
                 raise MetaError("O arquivo de vídeo está vazio.")
             params["tamanho_mb"] = round(p.stat().st_size / 1048576, 1)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             try:
                 if url:
                     r = await _post(c, f"{conta['act']}/advideos", {"file_url": url, "title": titulo})
@@ -2286,12 +2341,12 @@ async def enviar_video(
 # Leituras de apoio para montar campanhas
 
 @mcp.tool(annotations=_RO)
-async def listar_pixels(cliente: _CLIENTE = None) -> str:
+async def listar_pixels(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Pixels/datasets da conta padrão do cliente (para criar conjuntos de vendas ou leads)."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name,last_fired_time", "limit": 50})
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
             [{"id": r.get("id"), "nome": r.get("name"), "ultimo_disparo": (r.get("last_fired_time") or "")[:16]} for r in rows],
@@ -2301,12 +2356,12 @@ async def listar_pixels(cliente: _CLIENTE = None) -> str:
 
 
 @mcp.tool(annotations=_RO)
-async def listar_paginas(cliente: _CLIENTE = None) -> str:
+async def listar_paginas(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Páginas do Facebook (e Instagram ligado a elas) que a conta padrão do cliente pode usar nos anúncios."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/promote_pages",
                                   {"fields": "id,name,instagram_business_account{id,username}", "limit": 100})
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
@@ -2322,12 +2377,13 @@ async def listar_paginas(cliente: _CLIENTE = None) -> str:
 async def listar_midias(
     tipo: Annotated[Literal["imagens", "videos"], Field(description="imagens ou videos.")] = "imagens",
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Imagens (com hash) ou vídeos (com ID) já enviados à conta padrão do cliente, mais recentes primeiro."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             if tipo == "imagens":
                 rows = await _get(c, f"{conta['act']}/adimages", {"fields": "hash,name,created_time,width,height", "limit": 60})
                 linhas = [{"hash": r.get("hash"), "nome": r.get("name"), "tamanho": f"{r.get('width')}x{r.get('height')}",
@@ -2454,6 +2510,7 @@ async def criar_publico_lista(
     baseado_em_valor: Annotated[Optional[bool], Field(description="Público baseado em valor (usa a coluna value). Vazio: ligado se o CSV tem coluna value ou valor.")] = None,
     simular: Annotated[bool, Field(description="True: só confere o arquivo e mostra o que seria enviado, sem criar nada na Meta.")] = False,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria um público personalizado de lista de clientes na conta padrão do cliente e envia o CSV em lotes de
     10.000 linhas. Exige a permissão 'criar e duplicar'. O arquivo precisa estar com hash SHA-256 (nada em texto
@@ -2476,7 +2533,7 @@ async def criar_publico_lista(
         if simular:
             return f"SIMULAÇÃO, nada foi enviado à Meta. Cliente: {nome_cliente}\n{resumo}\nSeriam {lotes} lote(s) de até {_LOTE_PUBLICO:,} linhas."
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             existentes = await _get_all(c, f"{conta['act']}/customaudiences", {"fields": "id,name", "limit": 200})
             igual = next((a for a in existentes if str(a.get("name", "")).strip().lower() == nome.strip().lower()), None)
             if igual:
@@ -2520,12 +2577,12 @@ async def criar_publico_lista(
 
 
 @mcp.tool(annotations=_RO)
-async def listar_publicos(cliente: _CLIENTE = None) -> str:
+async def listar_publicos(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Públicos personalizados da conta padrão do cliente, com tamanho aproximado e status (para conferir um upload de lista)."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/customaudiences", {
                 "fields": "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,operation_status,delivery_status,time_created",
                 "limit": 100})
@@ -2628,6 +2685,7 @@ async def criar_publico_site(
     excluir_url_contem: Annotated[Optional[str], Field(description="Tira do público quem visitou páginas com este trecho (ex.: /obrigado).")] = None,
     descricao: Annotated[Optional[str], Field(max_length=500)] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria um público personalizado de visitantes do site (pixel) na conta padrão do cliente: todos os visitantes, quem
     visitou certas páginas, quem disparou um evento ou os que mais ficaram no site, com exclusões opcionais. Exige a
@@ -2639,7 +2697,7 @@ async def criar_publico_site(
                       percentil_tempo=percentil_tempo if tipo == "tempo_no_site" else None, retencao_dias=retencao_dias,
                       excluir_evento=excluir_evento, excluir_url_contem=excluir_url_contem, descricao=descricao)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
             if not pixel_id:
                 if len(pixels) != 1:
@@ -2677,6 +2735,7 @@ async def criar_publico_engajamento(
     pagina_id: Annotated[Optional[str], Field(description="Página dona do formulário (origem formulario).")] = None,
     descricao: Annotated[Optional[str], Field(max_length=500)] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria um público personalizado de engajamento (Instagram, página do Facebook ou formulário instantâneo) na conta
     padrão do cliente. Exige a permissão 'criar e duplicar'."""
@@ -2697,7 +2756,7 @@ async def criar_publico_engajamento(
             "event_sources": [fonte], "retention_seconds": 0 if evento in _SEM_RETENCAO else retencao_dias * 86400,
             "filter": {"operator": "or", "filters": [{"field": "event", "operator": "eq", "value": evento}]}}]}}
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             await _nomes_livres(c, conta, [nome])
             try:
                 r = await _post(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "ENGAGEMENT", "description": descricao,
@@ -2722,6 +2781,7 @@ async def criar_publico_semelhante(
     paises: Annotated[list[str], Field(description="Países onde procurar pessoas parecidas (ex.: ['BR']).", min_length=1)] = ["BR"],
     nome: Annotated[Optional[str], Field(description="Nome base. Vazio: 'Semelhante 1% (BR) - <origem>'. Com vários percentuais o % entra no nome.", max_length=180)] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria públicos semelhantes (lookalike) a partir de um público da conta padrão do cliente, um por percentual pedido.
     Exige a permissão 'criar e duplicar'. A origem precisa ter ao menos 100 pessoas do país escolhido; cada semelhante
@@ -2737,7 +2797,7 @@ async def criar_publico_semelhante(
             raise MetaError("paises precisa de códigos de 2 letras (ex.: BR).")
         params = dict(origem_id=origem_id, percentuais=percs, paises=codigos, nome=nome)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             origem = (await _publicos_da_conta(c, conta, [origem_id]))[0]
             if str(origem.get("subtype")).upper() == "LOOKALIKE":
                 raise MetaError("A origem já é um público semelhante. Use um público de lista, de site ou de engajamento.")
@@ -2778,6 +2838,7 @@ async def alterar_publico(
     nome: Annotated[Optional[str], Field(description="Nome novo.", min_length=1, max_length=200)] = None,
     descricao: Annotated[Optional[str], Field(description="Descrição nova.", max_length=500)] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Muda o nome ou a descrição de um público da conta padrão do cliente. Exige a permissão 'editar'."""
     try:
@@ -2787,7 +2848,7 @@ async def alterar_publico(
             raise MetaError("Informe nome ou descricao para alterar.")
         params = {"nome": nome, "descricao": descricao}
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             antigo = (await _publicos_da_conta(c, conta, [id]))[0]
             if nome is not None and nome.strip().lower() != str(antigo.get("name", "")).strip().lower():
                 await _nomes_livres(c, conta, [nome])
@@ -2811,6 +2872,7 @@ async def atualizar_publico_lista(
     operacao: Annotated[Literal["adicionar", "remover"], Field(description="adicionar linhas ao público ou remover as do arquivo.")] = "adicionar",
     simular: Annotated[bool, Field(description="True: só confere o arquivo, sem enviar nada.")] = False,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Adiciona ou remove pessoas de um público de lista de clientes que já existe na conta padrão do cliente, enviando um
     CSV com hash em lotes de 10.000. Exige a permissão 'editar'. A Meta pode recusar a remoção se o público ficar pequeno
@@ -2829,7 +2891,7 @@ async def atualizar_publico_lista(
         if simular:
             return f"SIMULAÇÃO, nada foi enviado à Meta. Cliente: {nome_cliente}\n{resumo}\nSeriam {lotes} lote(s) para {operacao}."
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             aud = (await _publicos_da_conta(c, conta, [publico_id]))[0]
             if str(aud.get("subtype")).upper() != "CUSTOM":
                 raise MetaError(f"O público '{aud.get('name')}' não é de lista de clientes (é {aud.get('subtype')}); só esses aceitam linhas por arquivo.")
@@ -2906,6 +2968,7 @@ async def estimar_publico(
     posicionamentos: Annotated[list[_POSICAO], Field(description="Posicionamentos manuais. Vazio: automático.")] = [],
     meta: Annotated[Literal["REACH", "LINK_CLICKS", "IMPRESSIONS", "LANDING_PAGE_VIEWS"], Field(description="Meta de otimização da estimativa.")] = "REACH",
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Estima o tamanho do público de uma segmentação na conta padrão do cliente (pessoas por mês e por dia) antes de
     criar o conjunto. Só leitura."""
@@ -2916,7 +2979,7 @@ async def estimar_publico(
                             excluir=publicos_excluir, interesses=interesses, posicoes=posicionamentos)
         alvo.pop("targeting_automation", None)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             r = await _get(c, f"{conta['act']}/delivery_estimate", {"optimization_goal": meta,
                                                                    "targeting_spec": json.dumps(alvo, ensure_ascii=False)})
         e = (r.get("data") or [{}])[0]
@@ -3122,13 +3185,14 @@ async def diagnosticar_entrega(
     nivel: Annotated[Literal["anuncio", "conjunto"], Field(description="anuncio: reprovações e problemas; conjunto: fase de aprendizado e problemas.")] = "anuncio",
     incluir_normais: Annotated[bool, Field(description="True mostra também o que está sem problema.")] = False,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Por que algo não entrega: anúncios reprovados, em análise ou com problemas (com o motivo da Meta) e conjuntos
     com aprendizado limitado ou problemas. Só lê. Usa só o que a conta padrão do cliente tem."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             if nivel == "anuncio":
                 rows = await _get_all(c, f"{conta['act']}/ads", {
                     "fields": "id,name,effective_status,issues_info,ad_review_feedback,adset_id,campaign_id", "limit": 200,
@@ -3167,6 +3231,7 @@ async def log_atividades(
     ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: hoje.")] = None,
     limite: Annotated[int, Field(description="Máximo de eventos.", ge=1, le=500)] = 100,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Histórico de alterações feito na conta padrão do cliente (quem mudou o quê e quando), direto da Meta. Serve para
     descobrir por que o desempenho mudou. Só lê."""
@@ -3177,7 +3242,7 @@ async def log_atividades(
         if d1 > d2:
             raise MetaError("'desde' não pode ser depois de 'ate'.")
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             dados = await _get(c, f"{conta['act']}/activities", {
                 "fields": "event_time,event_type,translated_event_type,object_id,object_name,object_type,actor_name,extra_data",
                 "since": d1.isoformat(), "until": (d2 + timedelta(days=1)).isoformat(), "limit": limite})
@@ -3227,12 +3292,13 @@ async def previa_anuncio(
 async def listar_criativos(
     limite: Annotated[int, Field(description="Máximo de criativos.", ge=1, le=200)] = 50,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Criativos da conta padrão do cliente (texto, título, botão, miniatura, post de origem). Para reaproveitar em novos anúncios."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             dados = await _get(c, f"{conta['act']}/adcreatives", {
                 "fields": "id,name,status,object_type,title,body,call_to_action_type,thumbnail_url,effective_object_story_id", "limit": limite})
         rows = (dados.get("data") or [])[:limite]
@@ -3250,13 +3316,14 @@ async def listar_instagram(
     instagram_id: Annotated[Optional[str], Field(description="Vazio lista os perfis do Instagram da conta; com ID lista os posts recentes desse perfil.")] = None,
     limite: Annotated[int, Field(description="Máximo de posts.", ge=1, le=50)] = 20,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Perfis do Instagram ligados à conta padrão do cliente e, com instagram_id, os posts recentes (ID, legenda, link, curtidas).
     O ID do post serve em criar_criativo/criar_anuncio (post_instagram_id). Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             perfis = await _get_all(c, f"{conta['act']}/instagram_accounts", {"fields": "id,username", "limit": 50})
             if not instagram_id:
                 return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
@@ -3310,13 +3377,14 @@ async def diagnosticar_pixel(
     pixel_id: Annotated[Optional[str], Field(description="ID do pixel. Vazio: o primeiro pixel da conta padrão.")] = None,
     dias: Annotated[int, Field(description="Janela em dias.", ge=1, le=30)] = 7,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Saúde de um pixel: quando disparou por último e quantos eventos recebeu por tipo nos últimos dias (PageView, Purchase etc.).
     Aponta pixel parado ou sem Purchase. Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name,last_fired_time,is_unavailable", "limit": 50})
             if not pixels:
                 return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\nA conta não tem pixel."
@@ -3347,12 +3415,12 @@ async def diagnosticar_pixel(
 
 
 @mcp.tool(annotations=_RO)
-async def listar_conversoes_personalizadas(cliente: _CLIENTE = None) -> str:
+async def listar_conversoes_personalizadas(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Conversões personalizadas da conta padrão do cliente (regra, evento, último disparo, se está arquivada). Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/customconversions", {
                 "fields": "id,name,custom_event_type,rule,is_archived,last_fired_time,pixel{id,name}", "limit": 100})
         linhas = [{"id": r.get("id"), "nome": r.get("name"), "evento": r.get("custom_event_type"), "regra": _scrub(str(r.get("rule") or ""))[:160],
@@ -3437,6 +3505,7 @@ async def criar_conversao_personalizada(
     pixel_id: Annotated[Optional[str], Field(description="Pixel da conta. Vazio: o primeiro pixel da conta padrão.")] = None,
     valor_padrao: Annotated[Optional[float], Field(description="Valor de cada conversão, se o site não envia valor.", ge=0)] = None,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Cria uma conversão personalizada baseada em URL, ligada a um pixel da conta padrão do cliente. Exige a permissão
     'criar e duplicar'. Não apaga nem altera as existentes; nome repetido é recusado."""
@@ -3448,7 +3517,7 @@ async def criar_conversao_personalizada(
             raise MetaError(f"Evento inválido. Use um destes: {', '.join(sorted(_EVENTOS_CONVERSAO))}.")
         params = dict(nome=nome, url_regra=url_regra, evento=ev, condicao=condicao, pixel_id=pixel_id, valor_padrao=valor_padrao)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
             if not pixels:
                 raise MetaError("A conta não tem pixel. Crie o pixel na BM antes.")
@@ -3482,12 +3551,12 @@ async def _catalogo_da_conta(c: httpx.AsyncClient, conta: dict, catalogo_id: str
 
 
 @mcp.tool(annotations=_RO)
-async def listar_catalogos(cliente: _CLIENTE = None) -> str:
+async def listar_catalogos(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Catálogos de produtos ligados à conta padrão do cliente, com quantidade de produtos. Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name,product_count,vertical", "limit": 50})
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(rows)} catálogo(s)\n" + _csv(
             [{"id": r.get("id"), "nome": r.get("name"), "produtos": r.get("product_count"), "vertical": r.get("vertical")} for r in rows],
@@ -3497,12 +3566,12 @@ async def listar_catalogos(cliente: _CLIENTE = None) -> str:
 
 
 @mcp.tool(annotations=_RO)
-async def listar_conjuntos_produtos(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None) -> str:
+async def listar_conjuntos_produtos(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Conjuntos de produtos de um catálogo da conta padrão (filtro e quantidade). Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             cat = await _catalogo_da_conta(c, conta, catalogo_id)
             rows = await _get_all(c, f"{catalogo_id}/product_sets", {"fields": "id,name,filter,product_count", "limit": 100})
         return f"Cliente: {nome_cliente} | Catálogo: {cat.get('name')} | {len(rows)} conjunto(s) de produtos\n" + _csv(
@@ -3518,12 +3587,13 @@ async def listar_produtos(
     busca: Annotated[Optional[str], Field(description="Trecho do nome do produto.", max_length=100)] = None,
     limite: Annotated[int, Field(description="Máximo de produtos.", ge=1, le=200)] = 50,
     cliente: _CLIENTE = None,
+    conta: _CONTA = None,
 ) -> str:
     """Produtos de um catálogo da conta padrão: preço, disponibilidade e se a Meta aprovou. Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             cat = await _catalogo_da_conta(c, conta, catalogo_id)
             params = {"fields": "id,retailer_id,name,price,availability,review_status,url", "limit": limite}
             if busca:
@@ -3539,13 +3609,13 @@ async def listar_produtos(
 
 
 @mcp.tool(annotations=_RO)
-async def diagnosticar_catalogo(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None) -> str:
+async def diagnosticar_catalogo(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Saúde de um catálogo da conta padrão: feeds com a última atualização (itens aceitos, inválidos, erros) e problemas
     apontados pela Meta. Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             cat = await _catalogo_da_conta(c, conta, catalogo_id)
             feeds = await _get_all(c, f"{catalogo_id}/product_feeds", {
                 "fields": "id,name,schedule,latest_upload{end_time,num_detected_items,num_persisted_items,num_invalid_items,error_count,warning_count}", "limit": 50})
@@ -3576,12 +3646,12 @@ async def diagnosticar_catalogo(catalogo_id: Annotated[str, Field(description="I
 
 
 @mcp.tool(annotations=_RO)
-async def listar_testes_ab(cliente: _CLIENTE = None) -> str:
+async def listar_testes_ab(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Testes A/B (estudos) da conta padrão do cliente: nome, tipo, período e células com divisão de público. Só lê."""
     try:
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
-            conta = await _conta_padrao(c)
+            conta = await _conta_padrao(c, conta)
             rows = await _get_all(c, f"{conta['act']}/ad_studies", {
                 "fields": "id,name,type,start_time,end_time,cells{name,treatment_percentage}", "limit": 50})
         linhas = [{"id": r.get("id"), "nome": r.get("name"), "tipo": r.get("type"), "inicio": (r.get("start_time") or "")[:10],

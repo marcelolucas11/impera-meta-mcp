@@ -51,6 +51,7 @@ A ponte do Claude com a Meta é o servidor, não o app: funciona com o app abert
 | 5.0.4 | Tipo do ID (campanha/conjunto/anúncio) descoberto sem depender do `metadata` da Meta, que vinha vazio ou com nomes antigos e travava `duplicar` e `alterar_orcamento`. |
 | 5.0.5 | Chave por cliente "Exigir período" (`EXIGIR_PERIODO=1`); `estrutura_conta` com `desde`/`ate` lista só o que veiculou no período (ativo ou pausado, com `gasto_periodo`); `duplicar` com `orcamento_diario` da cópia (teto conferido contra o valor novo) e teto aplicado aos conjuntos de campanha sem orçamento de campanha. |
 | 6.2.0 | `criar_conversao_personalizada`; leituras de catálogo (`listar_catalogos`, `listar_conjuntos_produtos`, `listar_produtos`, `diagnosticar_catalogo`) e `listar_testes_ab`. Impulsionar post = `criar_anuncio` com `post_instagram_id`. Faltam: criar teste A/B, criar catálogo/feed, anúncio dinâmico. Nomes de campos de ad_studies e diagnostics do catálogo não conferidos na Meta real. |
+| 6.3.0 | Várias contas por cliente: `CONTAS_LIBERADAS` no `clientes/<id>.env` (marcadas na ficha, em Conexão), parâmetro `conta` (ID numérico) nas ferramentas de criação e apoio, itens existentes aceitos se forem de conta liberada, histórico anota a conta. Só testado contra Meta simulada. |
 | 6.1.0 | Nove leituras: `diagnosticar_entrega`, `log_atividades`, `comparar_periodos`, `previa_anuncio`, `listar_criativos`, `listar_instagram`, `biblioteca_anuncios`, `diagnosticar_pixel`, `listar_conversoes_personalizadas`. Faltam: A/B, impulsionar post, criar conversão personalizada, catálogos. |
 | 6.0.0 | Auditoria contra o MCP nativo: campanha/conjunto completos (categorias especiais, orçamento total, públicos, interesses, posicionamentos, destinos WhatsApp/formulário), públicos de site/engajamento/semelhante, criativos (carrossel, post, Instagram), `enviar_video`, `atualizar_conjunto/campanha`, `buscar_interesses`, `estimar_publico`. Só testado em API simulada. Faltam (6.1.0): diagnóstico de entrega, prévias, biblioteca de anúncios, pixel/conversões, A/B, catálogos. |
 | 5.1.0 | `criar_publico_lista` (CSV com hash SHA-256 do Mac vira público personalizado, em lotes de 10.000, com valor opcional e simulação) e `listar_publicos`. |
@@ -82,7 +83,7 @@ Alteração (só com a permissão ligada para o cliente):
 
 Análises: com `EXIGIR_PERIODO=1` no cliente, `consultar_insights` e `exportar_relatorio` recusam chamada sem `desde` e `ate`, e a mensagem manda o Claude perguntar o período (ou usar o que o usuário já disse). `estrutura_conta` sem período continua liberada, porque serve para achar IDs antes de alterar.
 
-Garantias da escrita: só na conta padrão do cliente; tudo criado ou duplicado nasce PAUSADO; teto de orçamento diário (`ORCAMENTO_MAX_DIA`) recusado antes de chegar à Meta; registro em `historico/<cliente>.jsonl` (o app mostra); POST nunca repetido às cegas (só quando a Meta recusou antes de processar); nada é apagado. O token precisa de `ads_management` para alterar.
+Garantias da escrita: só na conta padrão do cliente e nas contas liberadas por ele no app (`CONTAS_LIBERADAS`); tudo criado ou duplicado nasce PAUSADO; teto de orçamento diário (`ORCAMENTO_MAX_DIA`) recusado antes de chegar à Meta; registro em `historico/<cliente>.jsonl` (o app mostra); POST nunca repetido às cegas (só quando a Meta recusou antes de processar); nada é apagado. O token precisa de `ads_management` para alterar.
 
 ## 5. Onde ficam as coisas no Mac
 
@@ -90,7 +91,7 @@ Tudo em `~/meta-ads-mcp`:
 
 | Caminho | Conteúdo | Vai para o GitHub? |
 |---|---|---|
-| `clientes/<id>.env` | Token, conta padrão, evento de compra, permissões, teto, exigir período (permissão 600) | Nunca |
+| `clientes/<id>.env` | Token, conta padrão, contas liberadas, evento de compra, permissões, teto, exigir período (permissão 600) | Nunca |
 | `historico/<id>.jsonl` | Alterações feitas pelo Claude | Nunca |
 | `relatorios/<id>/` | `.xlsx` exportados | Nunca |
 | `.env` | Ajustes gerais (versão da API, pasta de saída, `SEGUNDO_PLANO`) | Nunca |

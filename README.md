@@ -142,7 +142,7 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 
 ## Segurança
 
-- Leitura sempre; alteração só com a permissão do cliente ligada no app, só na conta padrão dele, e o Claude Desktop pede confirmação a cada uma.
+- Leitura sempre; alteração só com a permissão do cliente ligada no app, só na conta padrão dele e nas contas que ele liberar na ficha, e o Claude Desktop pede confirmação a cada uma.
 - Tudo que é criado ou duplicado nasce pausado. Ativar é uma ação separada, que exige a permissão "Ativar e pausar".
 - Orçamentos acima do teto do cliente são recusados antes de chegar à Meta. Nenhuma ferramenta apaga nada.
 - Uma alteração nunca é reenviada às cegas: se a conexão cair no meio, o Claude avisa que ela pode ter sido aplicada, em vez de repetir.

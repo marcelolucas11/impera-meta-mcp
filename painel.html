@@ -311,6 +311,10 @@ function desenharConexao() {
     ${d ? `<div class="linha"><span>Dono do token</span><span>${esc(d.dono || "–")}</span></div>` : ""}
     ${d && d.permissoes ? `<div class="linha"><span>Permissões</span><div class="etiquetas">${d.permissoes.map((p) => `<span>${esc(p)}</span>`).join("") || "nenhuma"}</div></div>` : ""}
     <div class="linha"><label for="sel-conta">Conta padrão</label>${contaCampo}</div>
+    ${d && d.contas.length > 1 ? `<div class="linha"><span>Outras contas liberadas</span><div class="permissoes" id="contas-liberadas">
+      ${d.contas.filter((a) => a.id !== c.conta_padrao).map((a) => `<label class="chave"><input type="checkbox" data-conta-lib="${esc(a.id)}" ${(c.contas_liberadas || []).includes(a.id) ? "checked" : ""}>
+        <span class="trilho" aria-hidden="true"></span><span><b>${esc(a.nome)}</b><small>${esc(a.id)}</small></span></label>`).join("")}</div></div>
+    <p class="dica">O Claude só altera a conta padrão e as que você marcar aqui, e informa a conta em cada pedido. As permissões de alteração valem para todas elas.</p>` : ""}
     <div class="linha"><label for="evento">Evento de compra</label><div class="junto">
       <input class="campo" id="evento" style="max-width:300px" value="${esc(c.evento_compra)}" spellcheck="false" autocomplete="off">
       <button class="btn leve" type="button" id="btn-evento">Salvar evento</button></div></div>
@@ -617,12 +621,21 @@ document.addEventListener("change", async (ev) => {
     } catch (e) { ev.target.checked = !ativo; msg("#msg-fundo", e.message, "erro"); }
     return;
   }
+  if (ev.target.dataset && ev.target.dataset.contaLib) {
+    const c = cliente(atual);
+    const marcadas = [...document.querySelectorAll("[data-conta-lib]")].filter((x) => x.checked).map((x) => x.dataset.contaLib);
+    try {
+      await api("POST", `clientes/${atual}/config`, { contas_liberadas: marcadas });
+      c.contas_liberadas = marcadas; msg("#msg-conexao", "Contas liberadas salvas.", "ok");
+    } catch (e) { ev.target.checked = !ev.target.checked; msg("#msg-conexao", e.message, "erro"); }
+    return;
+  }
   if (ev.target.id !== "sel-conta") return;
   const c = cliente(atual);
   try {
     await api("POST", `clientes/${atual}/config`, { conta_padrao: ev.target.value });
     c.conta_padrao = ev.target.value; delete resumo[atual];
-    desenharRol(); desenharTopo(); desenharRelatorios(); msg("#msg-conexao", "Conta padrão salva.", "ok"); puxarResumo(atual);
+    desenharRol(); desenharTopo(); desenharRelatorios(); desenharConexao(); msg("#msg-conexao", "Conta padrão salva.", "ok"); puxarResumo(atual);
   } catch (e) { msg("#msg-conexao", e.message, "erro"); }
 });
 

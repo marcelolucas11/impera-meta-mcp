@@ -278,7 +278,7 @@ async def main():
         r = await coro
         check(f"leitura de apoio: {nome}", esperado in r and not r.startswith("ERRO"), r.splitlines()[0][:80])
     out = await server.listar_clientes()
-    check("listar_clientes mostra as permissões", "dona,dona,222222222222222,auto,ler+status+orcamento+editar+criar" in out, out.splitlines()[2][:100])
+    check("listar_clientes mostra as permissões", "dona,dona,222222222222222,222222222222222,auto,ler+status+orcamento+editar+criar" in out, out.splitlines()[2][:100])
 
     # A Meta real pode não mandar metadata.type (ou mandar nomes antigos): o tipo tem que ser descoberto mesmo assim
     cliente("primos", "status,orcamento,editar,criar", teto="5000")

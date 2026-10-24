@@ -106,6 +106,7 @@ def op_estado() -> dict:
         "clientes": [{
             "id": cid, "nome": v.get("NOME") or cid,
             "conta_padrao": v.get("META_AD_ACCOUNT_ID", ""),
+            "contas_liberadas": [x for x in server._liberadas_de(v) if x != re.sub(r"\D", "", v.get("META_AD_ACCOUNT_ID", ""))],
             "evento_compra": v.get("META_PURCHASE_ACTION") or "auto",
             "pasta": str(_raiz_relatorios() / cid),
             "relatorios": _relatorios(cid),
@@ -215,6 +216,12 @@ def op_config(cid: str, dados: dict) -> dict:
         if conta and not conta.isdigit():
             raise Erro("ID de conta inválido.")
         valores["META_AD_ACCOUNT_ID"] = conta
+    if "contas_liberadas" in dados:
+        lista = dados["contas_liberadas"] if isinstance(dados["contas_liberadas"], list) else []
+        ids = [re.sub(r"^act_", "", str(x).strip()) for x in lista]
+        if any(not x.isdigit() for x in ids):
+            raise Erro("ID de conta inválido.")
+        valores["CONTAS_LIBERADAS"] = ",".join(dict.fromkeys(ids))
     if "evento_compra" in dados:
         ev = str(dados["evento_compra"]).strip() or "auto"
         if not _EVENTO.match(ev):
