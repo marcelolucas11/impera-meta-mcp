@@ -1,5 +1,17 @@
 # Novidades
 
+## 6.1.0
+
+- **Mais nove leituras para o Claude investigar uma conta**, todas só de leitura (nada é alterado):
+- `diagnosticar_entrega`: mostra anúncios reprovados, em análise ou com problemas, com o motivo que a Meta deu, e conjuntos com aprendizado limitado.
+- `log_atividades`: quem mudou o quê na conta e quando. Ajuda a explicar por que o desempenho mudou.
+- `comparar_periodos`: dois períodos lado a lado, com a variação percentual de gasto, compras, ROAS, CPA, CPM e CTR por campanha, conjunto ou anúncio.
+- `previa_anuncio`: link para ver como o anúncio aparece no Feed, Stories ou Reels.
+- `listar_criativos` e `listar_instagram`: criativos da conta e perfis e posts do Instagram, com o ID do post para usar em novos anúncios.
+- `biblioteca_anuncios`: pesquisa na Biblioteca de Anúncios da Meta para ver o que os concorrentes estão rodando.
+- `diagnosticar_pixel` e `listar_conversoes_personalizadas`: se o pixel está disparando, quais eventos recebeu (e se falta Purchase) e as conversões personalizadas da conta.
+- Como na 6.0.0, foram testadas contra uma Meta simulada. A Biblioteca de Anúncios exige que o dono do token tenha a autorização dela na Meta.
+
 ## 6.0.0
 
 - **O app agora faz o que um gestor de tráfego faz na BM.** Passou de 19 para 30 ferramentas, cobrindo o que o MCP nativo da Meta faz na criação e edição de campanhas. Tudo continua nascendo PAUSADO, só na conta padrão do cliente, respeitando o teto diário e com registro no histórico.

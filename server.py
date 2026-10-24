@@ -16,6 +16,7 @@ import asyncio
 import contextvars
 import csv
 import hashlib
+import html
 import hmac
 import io
 import json
@@ -24,7 +25,7 @@ import os
 import re
 import sys
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional, get_args
 
@@ -3091,6 +3092,333 @@ async def atualizar_campanha(
         return f"Cliente: {nome_cliente}\nOK {msg}"
     except Exception as e:
         return _tool_error(e)
+
+
+# ───────────────────────── 6.1.0: diagnóstico, prévia, criativos, Instagram, biblioteca, pixel, conversões, comparação ─────────────────────────
+
+_STATUS_PROBLEMA = {"DISAPPROVED", "WITH_ISSUES", "PENDING_REVIEW", "PENDING_BILLING_INFO", "ADSET_PAUSED_ERROR", "IN_PROCESS"}
+_STATUS_TXT = {"DISAPPROVED": "reprovado", "WITH_ISSUES": "com problemas", "PENDING_REVIEW": "em análise",
+               "PENDING_BILLING_INFO": "falta forma de pagamento", "IN_PROCESS": "processando", "ACTIVE": "ativo",
+               "PAUSED": "pausado", "CAMPAIGN_PAUSED": "campanha pausada", "ADSET_PAUSED": "conjunto pausado",
+               "ARCHIVED": "arquivado", "DELETED": "excluído"}
+
+
+def _txt_problemas(r: dict) -> str:
+    partes = []
+    for i in (r.get("issues_info") or []):
+        partes.append(str(i.get("error_summary") or i.get("error_message") or i.get("level") or "problema"))
+    fb = r.get("ad_review_feedback") or {}
+    for bloco in (fb.get("global") or {}, ):
+        for k, v in bloco.items():
+            partes.append(f"revisão: {k} ({v})")
+    for pos, motivos in (fb.get("placement_specific") or {}).items():
+        for k, v in (motivos or {}).items():
+            partes.append(f"revisão em {pos}: {k} ({v})")
+    return " | ".join(dict.fromkeys(partes))
+
+
+@mcp.tool(annotations=_RO)
+async def diagnosticar_entrega(
+    nivel: Annotated[Literal["anuncio", "conjunto"], Field(description="anuncio: reprovações e problemas; conjunto: fase de aprendizado e problemas.")] = "anuncio",
+    incluir_normais: Annotated[bool, Field(description="True mostra também o que está sem problema.")] = False,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Por que algo não entrega: anúncios reprovados, em análise ou com problemas (com o motivo da Meta) e conjuntos
+    com aprendizado limitado ou problemas. Só lê. Usa só o que a conta padrão do cliente tem."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            if nivel == "anuncio":
+                rows = await _get_all(c, f"{conta['act']}/ads", {
+                    "fields": "id,name,effective_status,issues_info,ad_review_feedback,adset_id,campaign_id", "limit": 200,
+                    "effective_status": json.dumps(["ACTIVE", "PAUSED", "DISAPPROVED", "WITH_ISSUES", "PENDING_REVIEW", "PENDING_BILLING_INFO",
+                                                    "CAMPAIGN_PAUSED", "ADSET_PAUSED", "IN_PROCESS"])})
+            else:
+                rows = await _get_all(c, f"{conta['act']}/adsets", {
+                    "fields": "id,name,effective_status,issues_info,learning_stage_info,campaign_id", "limit": 200,
+                    "effective_status": json.dumps(["ACTIVE", "PAUSED", "WITH_ISSUES", "CAMPAIGN_PAUSED", "IN_PROCESS", "PENDING_BILLING_INFO"])})
+        linhas = []
+        for r in rows:
+            st = r.get("effective_status") or ""
+            prob = _txt_problemas(r)
+            apr = (r.get("learning_stage_info") or {}).get("status")
+            ruim = st in _STATUS_PROBLEMA or bool(prob) or apr == "FAIL"
+            if not (ruim or incluir_normais):
+                continue
+            linha = {"id": r.get("id"), "nome": r.get("name"), "situacao": _STATUS_TXT.get(st, st), "problemas": prob or None,
+                     "campanha_id": r.get("campaign_id")}
+            if nivel == "conjunto":
+                linha["aprendizado"] = {"LEARNING": "aprendendo", "SUCCESS": "concluído", "FAIL": "aprendizado limitado"}.get(apr, apr)
+            else:
+                linha["conjunto_id"] = r.get("adset_id")
+            linhas.append(linha)
+        cols = ["id", "nome", "situacao", "problemas", "campanha_id"] + (["aprendizado"] if nivel == "conjunto" else ["conjunto_id"])
+        topo = f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} de {len(rows)} {nivel}(s) " + \
+               ("listados" if incluir_normais else "com algo a resolver")
+        return topo + "\n" + (_csv(linhas, cols) if linhas else "Nada com problema nos itens ativos, pausados ou em análise.\n")
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def log_atividades(
+    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias atrás.")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Vazio: hoje.")] = None,
+    limite: Annotated[int, Field(description="Máximo de eventos.", ge=1, le=500)] = 100,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Histórico de alterações feito na conta padrão do cliente (quem mudou o quê e quando), direto da Meta. Serve para
+    descobrir por que o desempenho mudou. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        d2 = _parse_date(ate, "ate") if ate else date.today()
+        d1 = _parse_date(desde, "desde") if desde else d2 - timedelta(days=7)
+        if d1 > d2:
+            raise MetaError("'desde' não pode ser depois de 'ate'.")
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            dados = await _get(c, f"{conta['act']}/activities", {
+                "fields": "event_time,event_type,translated_event_type,object_id,object_name,object_type,actor_name,extra_data",
+                "since": d1.isoformat(), "until": (d2 + timedelta(days=1)).isoformat(), "limit": limite})
+        rows = (dados.get("data") or [])[:limite]
+        linhas = [{"quando": (r.get("event_time") or "")[:16].replace("T", " "), "quem": r.get("actor_name"),
+                   "o_que": r.get("translated_event_type") or r.get("event_type"), "tipo": r.get("object_type"),
+                   "objeto": r.get("object_name"), "objeto_id": r.get("object_id"),
+                   "detalhe": _scrub(str(r.get("extra_data") or ""))[:200]} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {d1} a {d2} | {len(linhas)} evento(s)\n" + _csv(
+            linhas, ["quando", "quem", "o_que", "tipo", "objeto", "objeto_id", "detalhe"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+_FORMATOS_PREVIA = {"feed_facebook": "DESKTOP_FEED_STANDARD", "feed_mobile": "MOBILE_FEED_STANDARD", "instagram_feed": "INSTAGRAM_STANDARD",
+                    "instagram_stories": "INSTAGRAM_STORY", "instagram_reels": "INSTAGRAM_REELS", "facebook_stories": "FACEBOOK_STORY_MOBILE",
+                    "facebook_reels": "FACEBOOK_REELS_MOBILE"}
+
+
+@mcp.tool(annotations=_RO)
+async def previa_anuncio(
+    anuncio_id: Annotated[str, Field(description="ID do anúncio da conta padrão.")],
+    formato: Annotated[Literal["feed_facebook", "feed_mobile", "instagram_feed", "instagram_stories", "instagram_reels",
+                               "facebook_stories", "facebook_reels"], Field(description="Onde mostrar.")] = "instagram_feed",
+    cliente: _CLIENTE = None,
+) -> str:
+    """Link de prévia de como o anúncio aparece num posicionamento (abre no navegador). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, anuncio_id)
+            if tipo != "ad":
+                raise MetaError("previa_anuncio só vale para anúncios (não campanha ou conjunto).")
+            dados = await _get(c, f"{anuncio_id}/previews", {"ad_format": _FORMATOS_PREVIA[formato]})
+        itens = dados.get("data") or []
+        if not itens:
+            return f"Cliente: {nome_cliente} | A Meta não devolveu prévia para '{obj.get('name')}' em {formato} (formato não aceito por esse anúncio)."
+        m = re.search(r'src="([^"]+)"', str(itens[0].get("body") or ""))
+        if not m:
+            return f"Cliente: {nome_cliente} | A prévia veio sem link utilizável."
+        return f"Cliente: {nome_cliente} | Anúncio: {obj.get('name')} | Formato: {formato}\nPrévia: {html.unescape(m.group(1))}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_criativos(
+    limite: Annotated[int, Field(description="Máximo de criativos.", ge=1, le=200)] = 50,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Criativos da conta padrão do cliente (texto, título, botão, miniatura, post de origem). Para reaproveitar em novos anúncios."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            dados = await _get(c, f"{conta['act']}/adcreatives", {
+                "fields": "id,name,status,object_type,title,body,call_to_action_type,thumbnail_url,effective_object_story_id", "limit": limite})
+        rows = (dados.get("data") or [])[:limite]
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "status": r.get("status"), "tipo": r.get("object_type"),
+                   "titulo": r.get("title"), "texto": (r.get("body") or "")[:120], "botao": r.get("call_to_action_type"),
+                   "post": r.get("effective_object_story_id"), "miniatura": r.get("thumbnail_url")} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} criativo(s)\n" + _csv(
+            linhas, ["id", "nome", "status", "tipo", "titulo", "texto", "botao", "post", "miniatura"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_instagram(
+    instagram_id: Annotated[Optional[str], Field(description="Vazio lista os perfis do Instagram da conta; com ID lista os posts recentes desse perfil.")] = None,
+    limite: Annotated[int, Field(description="Máximo de posts.", ge=1, le=50)] = 20,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Perfis do Instagram ligados à conta padrão do cliente e, com instagram_id, os posts recentes (ID, legenda, link, curtidas).
+    O ID do post serve em criar_criativo/criar_anuncio (post_instagram_id). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            perfis = await _get_all(c, f"{conta['act']}/instagram_accounts", {"fields": "id,username", "limit": 50})
+            if not instagram_id:
+                return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
+                    [{"instagram_id": p.get("id"), "usuario": p.get("username")} for p in perfis], ["instagram_id", "usuario"])
+            if str(instagram_id) not in {str(p.get("id")) for p in perfis}:
+                raise MetaError(f"O perfil {instagram_id} não está ligado à conta padrão do cliente. Use listar_instagram sem ID para ver os liberados.")
+            dados = await _get(c, f"{instagram_id}/media", {
+                "fields": "id,caption,media_type,permalink,timestamp,like_count,comments_count", "limit": limite})
+        rows = (dados.get("data") or [])[:limite]
+        linhas = [{"post_id": r.get("id"), "data": (r.get("timestamp") or "")[:10], "tipo": r.get("media_type"),
+                   "legenda": (r.get("caption") or "").replace("\n", " ")[:100], "curtidas": r.get("like_count"),
+                   "comentarios": r.get("comments_count"), "link": r.get("permalink")} for r in rows]
+        return f"Cliente: {nome_cliente} | Instagram {instagram_id} | {len(linhas)} post(s)\n" + _csv(
+            linhas, ["post_id", "data", "tipo", "legenda", "curtidas", "comentarios", "link"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def biblioteca_anuncios(
+    termo: Annotated[str, Field(description="Palavra ou marca a buscar nos anúncios de qualquer anunciante.", min_length=2, max_length=100)],
+    paises: Annotated[Optional[list[str]], Field(description="Códigos de país (ex.: BR). Vazio: BR.")] = None,
+    so_ativos: Annotated[bool, Field(description="True só anúncios no ar agora.")] = True,
+    limite: Annotated[int, Field(description="Máximo de anúncios.", ge=1, le=100)] = 25,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Pesquisa na Biblioteca de Anúncios da Meta (pública): o que concorrentes estão rodando, desde quando, com link para ver
+    o anúncio. Só lê. Exige que o dono do token tenha a autorização da Biblioteca de Anúncios na Meta."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        ps = [p.strip().upper() for p in (paises or ["BR"])]
+        if not all(re.fullmatch(r"[A-Z]{2}", p) for p in ps):
+            raise MetaError("paises deve ter códigos de 2 letras, como BR.")
+        async with _client() as c:
+            dados = await _get(c, "ads_archive", {
+                "search_terms": termo, "ad_reached_countries": json.dumps(ps), "ad_type": "ALL",
+                "ad_active_status": "ACTIVE" if so_ativos else "ALL", "limit": limite,
+                "fields": "id,page_name,ad_creative_bodies,ad_delivery_start_time,ad_snapshot_url"})
+        rows = (dados.get("data") or [])[:limite]
+        linhas = [{"id": r.get("id"), "anunciante": r.get("page_name"), "desde": (r.get("ad_delivery_start_time") or "")[:10],
+                   "texto": ((r.get("ad_creative_bodies") or [""])[0] or "").replace("\n", " ")[:140],
+                   "ver": r.get("ad_snapshot_url")} for r in rows]
+        return f"Cliente: {nome_cliente} | Biblioteca de Anúncios: '{termo}' em {','.join(ps)} | {len(linhas)} anúncio(s)\n" + _csv(
+            linhas, ["id", "anunciante", "desde", "texto", "ver"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def diagnosticar_pixel(
+    pixel_id: Annotated[Optional[str], Field(description="ID do pixel. Vazio: o primeiro pixel da conta padrão.")] = None,
+    dias: Annotated[int, Field(description="Janela em dias.", ge=1, le=30)] = 7,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Saúde de um pixel: quando disparou por último e quantos eventos recebeu por tipo nos últimos dias (PageView, Purchase etc.).
+    Aponta pixel parado ou sem Purchase. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name,last_fired_time,is_unavailable", "limit": 50})
+            if not pixels:
+                return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\nA conta não tem pixel."
+            if pixel_id:
+                px = next((p for p in pixels if str(p.get("id")) == str(pixel_id)), None)
+                if not px:
+                    raise MetaError(f"O pixel {pixel_id} não é da conta padrão do cliente. Use listar_pixels para ver os liberados.")
+            else:
+                px = pixels[0]
+            ini = int((datetime.now(timezone.utc) - timedelta(days=dias)).timestamp())
+            est = await _get(c, f"{px['id']}/stats", {"aggregation": "event", "start_time": ini})
+        total: dict = {}
+        for janela in est.get("data") or []:
+            for e in janela.get("data") or []:
+                total[e.get("value")] = total.get(e.get("value"), 0) + int(e.get("count") or 0)
+        linhas = [{"evento": k, "recebidos": v} for k, v in sorted(total.items(), key=lambda kv: -kv[1])]
+        avisos = []
+        if px.get("is_unavailable"):
+            avisos.append("o pixel está indisponível")
+        if not total:
+            avisos.append(f"nenhum evento nos últimos {dias} dias: o pixel está parado ou fora do site")
+        elif "Purchase" not in total:
+            avisos.append("há eventos, mas nenhum Purchase: campanhas de vendas não conseguem otimizar")
+        topo = f"Cliente: {nome_cliente} | Pixel: {px.get('name')} ({px['id']}) | último disparo: {(px.get('last_fired_time') or 'nunca')[:16]} | últimos {dias} dias"
+        return topo + "".join(f"\nATENÇÃO: {a}" for a in avisos) + "\n" + _csv(linhas, ["evento", "recebidos"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_conversoes_personalizadas(cliente: _CLIENTE = None) -> str:
+    """Conversões personalizadas da conta padrão do cliente (regra, evento, último disparo, se está arquivada). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/customconversions", {
+                "fields": "id,name,custom_event_type,rule,is_archived,last_fired_time,pixel{id,name}", "limit": 100})
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "evento": r.get("custom_event_type"), "regra": _scrub(str(r.get("rule") or ""))[:160],
+                   "pixel": (r.get("pixel") or {}).get("name"), "arquivada": "sim" if r.get("is_archived") else "não",
+                   "ultimo_disparo": (r.get("last_fired_time") or "")[:16]} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} conversão(ões)\n" + _csv(
+            linhas, ["id", "nome", "evento", "regra", "pixel", "arquivada", "ultimo_disparo"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+_METRICAS_COMPARAR = ["gasto", "impressoes", "alcance", "cliques_link", "compras", "valor_compras", "cpm", "ctr_link", "cpc_link", "cpa", "roas"]
+
+
+@mcp.tool(annotations=_RO)
+async def comparar_periodos(
+    desde_a: Annotated[str, Field(description="Início do período A (o novo) AAAA-MM-DD.")],
+    ate_a: Annotated[str, Field(description="Fim do período A AAAA-MM-DD.")],
+    desde_b: Annotated[str, Field(description="Início do período B (o de comparação) AAAA-MM-DD.")],
+    ate_b: Annotated[str, Field(description="Fim do período B AAAA-MM-DD.")],
+    nivel: Annotated[Literal["conta", "campanha", "conjunto", "anuncio"], Field(description="Nível da comparação.")] = "campanha",
+    conta: Annotated[Optional[str], Field(description="ID da conta ou trecho do nome. Vazio usa a conta padrão.")] = None,
+    max_linhas: Annotated[int, Field(description="Máximo de linhas (maiores gastos).", ge=1, le=500)] = 50,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Compara dois períodos lado a lado (A contra B) com a variação percentual de gasto, compras, ROAS, CPA, CPM, CTR etc.
+    Alcance de cada período é o deduplicado daquele período. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        a1, a2 = _periodo(desde_a, ate_a)
+        b1, b2 = _periodo(desde_b, ate_b)
+        level = NIVEIS[nivel]
+        avisos: list = []
+        async with _client() as c:
+            acc = await _resolve_account(c, conta)
+            sem = asyncio.Semaphore(MAX_SIMULTANEAS)
+            ra, rb = await asyncio.gather(_insights(c, acc["act"], level, a1, a2, False, [], sem, None, avisos),
+                                          _insights(c, acc["act"], level, b1, b2, False, [], sem, None, avisos))
+        chave = {"account": None, "campaign": "campanha_id", "adset": "conjunto_id", "ad": "anuncio_id"}[level]
+        nome = {"account": "conta", "campaign": "campanha", "adset": "conjunto", "ad": "anuncio"}[level]
+
+        def k(r):
+            return str(r.get(chave) or "?") if chave else "conta"
+
+        ida = {k(r): r for r in ra}; idb = {k(r): r for r in rb}
+        def var(x, y):
+            if x is None or y in (None, 0):
+                return None
+            return round((x - y) / y * 100, 1)
+
+        linhas = []
+        for ident in sorted(set(ida) | set(idb), key=lambda i: -((ida.get(i) or {}).get("gasto") or 0)):
+            ra_, rb_ = ida.get(ident) or {}, idb.get(ident) or {}
+            linha = {nome: ra_.get(nome) or rb_.get(nome) or ident, "id": ident}
+            for m in _METRICAS_COMPARAR:
+                linha[f"{m}_A"] = ra_.get(m); linha[f"{m}_B"] = rb_.get(m); linha[f"{m}_var_pct"] = var(ra_.get(m), rb_.get(m))
+            linhas.append(linha)
+        cols = [nome, "id"] + [f"{m}_{s}" for m in _METRICAS_COMPARAR for s in ("A", "B", "var_pct")]
+        topo = [f"Cliente: {nome_cliente} | Conta: {acc['nome']} ({acc['id']}) | A = {a1} a {a2} | B = {b1} a {b2} | nível {nivel}",
+                f"Linhas: {len(linhas)}" + (f" (mostrando {max_linhas})" if len(linhas) > max_linhas else ""),
+                "var_pct = (A - B) / B em %. Em CPA, CPM e CPC, subir é piorar."]
+        topo += [f"AVISO: {x}" for x in avisos]
+        return "\n".join(topo) + "\n\n" + _csv(linhas[:max_linhas], cols)
+    except Exception as e:
+        return _tool_error(e)
+
 
 
 def main() -> None:

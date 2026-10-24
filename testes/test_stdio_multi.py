@@ -28,4 +28,4 @@ for _ in range(6):
 print("respostas na ordem de chegada:", " ".join(ordem))
 send({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {}}})
 print("sem cliente ->", recv()["result"]["content"][0]["text"][:95])
-p.terminate(); assert ok and len(tools) == 30, len(tools); print("OK")
+p.terminate(); assert ok and len(tools) == 39, len(tools); print("OK")
