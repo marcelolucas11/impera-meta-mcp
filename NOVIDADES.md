@@ -1,5 +1,14 @@
 # Novidades
 
+## 6.4.0
+
+- **Leads de formulário instantâneo.** `listar_formularios` mostra os formulários da página; `baixar_leads` baixa os leads (com filtro de data) para um CSV na pasta do cliente, com permissão restrita. A resposta do Claude mostra só a contagem e uma amostra com e-mail e telefone mascarados. `criar_formulario_leads` cria o formulário (nome, e-mail, telefone etc., política de privacidade e botão final, por exemplo para o grupo do WhatsApp). Para isso o usuário do sistema precisa estar atribuído à página com controle total.
+- **Regras automáticas da Meta.** `listar_regras` e `criar_regra_automatica`: por exemplo "se o custo por resultado do conjunto passar de R$ 40 nos últimos 3 dias, avisar ou pausar". A regra só avisa ou pausa, nunca aumenta orçamento, e nasce DESLIGADA para você conferir na BM (ligar já na criação ou pausar exige também a permissão "ativar e pausar").
+- **API de Conversões.** `enviar_eventos_conversao` manda vendas e leads do servidor para o pixel, por exemplo compras fechadas no WhatsApp. E-mail e telefone viram hash aqui no seu computador e nada sai em texto puro. Aceita até 1.000 eventos, só dos últimos 7 dias, com ID para não duplicar com o pixel do site. Com o código da aba "Testar eventos" da Meta os eventos ficam só no teste; sem o código eles são reais e entram nos relatórios.
+- Todas valem para as contas liberadas do cliente (campo `conta`) e registram no histórico sem dados pessoais nem tokens.
+- Testado só contra Meta simulada. Os campos das regras (nomes de métricas e valores em centavos) e do formulário são os que a documentação da Meta indica, mas ainda não foram vistos numa conta real: crie primeiro em conta de baixo risco, e a regra nasce desligada justamente por isso.
+- Ainda não existe: criar teste A/B, escrita de catálogo e feed, criativos PAC/Advantage+, edição de eventos do pixel, moderação de comentários, administração da BM.
+
 ## 6.3.0
 
 - **Mais de uma conta de anúncios por cliente.** Na ficha do cliente, em Conexão, aparece "Outras contas liberadas": marque as contas que o Claude também pode usar além da padrão (por exemplo a CA 02 do mesmo cliente). A lista usa as contas que o token enxerga.

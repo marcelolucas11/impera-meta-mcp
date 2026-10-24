@@ -13,6 +13,7 @@ de cada ação em historico/<cliente>.jsonl. Nada é apagado.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import csv
 import hashlib
@@ -160,7 +161,18 @@ def _token() -> str:
     return t
 
 
+_SEGREDOS_PAGINA: set = set()  # tokens de página obtidos em tempo de execução; nunca aparecem em respostas
+
+
+def _bearer(client: httpx.AsyncClient) -> str:
+    """Token que este cliente HTTP realmente usa (o do cliente ou, em leads, o da página)."""
+    h = client.headers.get("Authorization", "")
+    return h[7:] if h.startswith("Bearer ") else _token()
+
+
 def _scrub(text: str) -> str:
+    for t in _SEGREDOS_PAGINA:
+        text = text.replace(t, "***")
     for v in _clientes().values():
         t = v.get("META_ACCESS_TOKEN")
         if t:
@@ -215,7 +227,7 @@ async def _get(client: httpx.AsyncClient, path: str, params: Optional[dict] = No
     params = dict(params or {})
     secret = _cfg("META_APP_SECRET")
     if secret:
-        params["appsecret_proof"] = hmac.new(secret.encode(), _token().encode(), hashlib.sha256).hexdigest()
+        params["appsecret_proof"] = hmac.new(secret.encode(), _bearer(client).encode(), hashlib.sha256).hexdigest()
 
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
@@ -1314,7 +1326,7 @@ async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = 
             for k, v in data.items() if v is not None}
     secret = _cfg("META_APP_SECRET")
     if secret:
-        form["appsecret_proof"] = hmac.new(secret.encode(), _token().encode(), hashlib.sha256).hexdigest()
+        form["appsecret_proof"] = hmac.new(secret.encode(), _bearer(client).encode(), hashlib.sha256).hexdigest()
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
         try:
@@ -3658,6 +3670,345 @@ async def listar_testes_ab(cliente: _CLIENTE = None, conta: _CONTA = None) -> st
                    "fim": (r.get("end_time") or "")[:10],
                    "celulas": "; ".join(f"{x.get('name')} ({x.get('treatment_percentage')}%)" for x in (r.get("cells") or {}).get("data", []))} for r in rows]
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} teste(s)\n" + _csv(linhas, ["id", "nome", "tipo", "inicio", "fim", "celulas"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+
+# ───────────────────────── 6.4.0: leads, regras automáticas e API de Conversões ─────────────────────────
+
+@contextlib.asynccontextmanager
+async def _cliente_pagina(c: httpx.AsyncClient, conta: dict, pagina_id: str):
+    """Cliente HTTP com o token da PÁGINA (formulários e leads vivem na página). A página precisa estar liberada para a conta."""
+    pid = await _pagina_da_conta(c, conta, pagina_id)
+    info = await _get(c, pid, {"fields": "access_token,name"})
+    tok = info.get("access_token")
+    if not tok:
+        raise MetaError(f"A Meta não deu acesso à página {pid}: o usuário do sistema precisa estar atribuído à página "
+                        "com controle total (BM > Contas > Páginas > Adicionar pessoas) e o token precisa de pages_manage_ads "
+                        "e leads_retrieval.")
+    _SEGREDOS_PAGINA.add(tok)
+    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {tok}"}, timeout=httpx.Timeout(120.0, connect=20.0),
+                                 transport=_TRANSPORT) as pc:
+        pc._nome_pagina = info.get("name") or pid  # type: ignore[attr-defined]
+        yield pc
+
+
+@mcp.tool(annotations=_RO)
+async def listar_formularios(
+    pagina_id: Annotated[str, Field(description="Página do Facebook (de listar_paginas).")],
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Formulários instantâneos (lead ads) de uma página liberada para a conta: nome, status, quantidade de leads e perguntas. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                rows = await _get_all(pc, f"{pagina_id}/leadgen_forms", {"fields": "id,name,status,leads_count,created_time,questions", "limit": 100})
+                nome_pag = pc._nome_pagina
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "status": r.get("status"), "leads": r.get("leads_count"),
+                   "criado": (r.get("created_time") or "")[:10],
+                   "perguntas": ", ".join(str(q.get("key") or q.get("type")) for q in (r.get("questions") or []))} for r in rows]
+        return f"Cliente: {nome_cliente} | Página: {nome_pag} | {len(linhas)} formulário(s)\n" + _csv(linhas, ["id", "nome", "status", "leads", "criado", "perguntas"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+def _mascara(valor: str) -> str:
+    v = str(valor)
+    if "@" in v:
+        u, _, d = v.partition("@")
+        return (u[:1] + "***@" + d)
+    d = re.sub(r"\D", "", v)
+    return ("***" + d[-4:]) if len(d) >= 6 else v
+
+
+@mcp.tool()
+async def baixar_leads(
+    formulario_id: Annotated[str, Field(description="ID do formulário (de listar_formularios).")],
+    pagina_id: Annotated[str, Field(description="Página dona do formulário.")],
+    desde: Annotated[Optional[str], Field(description="Só leads a partir desta data AAAA-MM-DD. Vazio: todos.")] = None,
+    ate: Annotated[Optional[str], Field(description="Só leads até esta data AAAA-MM-DD. Vazio: até agora.")] = None,
+    max_leads: Annotated[int, Field(description="Teto de leads baixados.", ge=1, le=20000)] = 5000,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Baixa os leads de um formulário instantâneo para um CSV na pasta do cliente (dados pessoais: ficam só no computador,
+    arquivo com permissão restrita). A resposta mostra só a contagem e uma amostra com e-mail e telefone mascarados. Não altera nada na Meta."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        if not re.fullmatch(r"\d{5,25}", str(formulario_id)):
+            raise MetaError(f"ID de formulário inválido: {formulario_id!r}.")
+        d1 = _parse_date(desde, "desde") if desde else None
+        d2 = _parse_date(ate, "ate") if ate else None
+        if d1 and d2 and d1 > d2:
+            raise MetaError("'desde' não pode ser depois de 'ate'.")
+        filtros = []
+        if d1:
+            filtros.append({"field": "time_created", "operator": "GREATER_THAN", "value": int(datetime(d1.year, d1.month, d1.day, tzinfo=timezone.utc).timestamp()) - 1})
+        if d2:
+            filtros.append({"field": "time_created", "operator": "LESS_THAN", "value": int(datetime(d2.year, d2.month, d2.day, tzinfo=timezone.utc).timestamp()) + 86400})
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                forms = await _get_all(pc, f"{pagina_id}/leadgen_forms", {"fields": "id,name", "limit": 100})
+                form = next((f for f in forms if str(f.get("id")) == str(formulario_id)), None)
+                if not form:
+                    raise MetaError(f"O formulário {formulario_id} não é da página {pagina_id}. Use listar_formularios.")
+                params = {"fields": "id,created_time,field_data,ad_id,ad_name,adset_name,campaign_name", "limit": 200}
+                if filtros:
+                    params["filtering"] = json.dumps(filtros)
+                leads, p = [], dict(params)
+                while len(leads) < max_leads:
+                    pag = await _get(pc, f"{formulario_id}/leads", p)
+                    leads += pag.get("data") or []
+                    nxt = ((pag.get("paging") or {}).get("cursors") or {}).get("after")
+                    if not (pag.get("data") and (pag.get("paging") or {}).get("next") and nxt):
+                        break
+                    p = dict(params, after=nxt)
+        leads = leads[:max_leads]
+        campos: list = []
+        linhas = []
+        for l in leads:
+            r = {"lead_id": l.get("id"), "criado": (l.get("created_time") or "")[:19], "anuncio": l.get("ad_name"),
+                 "conjunto": l.get("adset_name"), "campanha": l.get("campaign_name")}
+            for fd in l.get("field_data") or []:
+                k = str(fd.get("name"))
+                if k not in campos:
+                    campos.append(k)
+                r[k] = ", ".join(str(x) for x in (fd.get("values") or []))
+            linhas.append(r)
+        cols = ["lead_id", "criado", "anuncio", "conjunto", "campanha"] + campos
+        arq = _export_dir() / f"leads-{formulario_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+        fd_ = os.open(str(arq), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd_, "w", encoding="utf-8", newline="") as f:
+            f.write(_csv_bruto(linhas, cols))
+        amostra = [{k: (_mascara(v) if k in campos and isinstance(v, str) else v) for k, v in r.items() if k in ["lead_id", "criado"] + campos} for r in linhas[:5]]
+        topo = (f"Cliente: {nome_cliente} | Formulário: {form.get('name')} | {len(linhas)} lead(s)"
+                + (f" (limitado a {max_leads}; use desde/ate para o resto)" if len(leads) >= max_leads else "") + f"\nArquivo: {arq}\nAmostra (mascarada):\n")
+        return topo + (_csv(amostra, ["lead_id", "criado"] + campos) if amostra else "Nenhum lead no período.\n")
+    except Exception as e:
+        return _tool_error(e)
+
+
+def _csv_bruto(rows: list, cols: list) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(cols)
+    for r in rows:
+        w.writerow(["" if r.get(c) is None else str(r[c]) for c in cols])
+    return buf.getvalue()
+
+
+_PERGUNTAS_PADRAO = {"nome": "FULL_NAME", "email": "EMAIL", "telefone": "PHONE", "cidade": "CITY", "estado": "STATE", "cpf": "CPF"}
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_formulario_leads(
+    pagina_id: Annotated[str, Field(description="Página do Facebook (de listar_paginas).")],
+    nome: Annotated[str, Field(description="Nome do formulário.", min_length=1, max_length=200)],
+    politica_privacidade_url: Annotated[str, Field(description="URL https da política de privacidade (a Meta exige).")],
+    perguntas: Annotated[list[str], Field(description="Campos pedidos: nome, email, telefone, cidade, estado, cpf.", min_length=1, max_length=10)] = ["nome", "email", "telefone"],
+    url_agradecimento: Annotated[Optional[str], Field(description="Link do botão da tela final (ex.: grupo do WhatsApp). Vazio: a tela final fecha o formulário.")] = None,
+    titulo_agradecimento: Annotated[str, Field(max_length=60)] = "Obrigado!",
+    texto_agradecimento: Annotated[str, Field(max_length=200)] = "Recebemos seus dados e entraremos em contato.",
+    idioma: Annotated[str, Field(description="Idioma do formulário.")] = "pt_BR",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria um formulário instantâneo (lead ad) na página liberada da conta. Exige a permissão 'criar e duplicar'. O formulário
+    não gasta nada sozinho: só é usado quando um anúncio de leads o referencia. Nome repetido na página é recusado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        for u, rot in ((politica_privacidade_url, "politica_privacidade_url"), (url_agradecimento, "url_agradecimento")):
+            if u and not u.lower().startswith("https://"):
+                raise MetaError(f"{rot} precisa começar com https://.")
+        tipos = []
+        for q in perguntas:
+            k = q.strip().lower()
+            if k not in _PERGUNTAS_PADRAO:
+                raise MetaError(f"Pergunta '{q}' desconhecida. Use: {', '.join(_PERGUNTAS_PADRAO)}.")
+            tipos.append({"type": _PERGUNTAS_PADRAO[k]})
+        params = dict(pagina_id=pagina_id, nome=nome, perguntas=perguntas, politica=politica_privacidade_url, agradecimento=url_agradecimento)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                existentes = await _get_all(pc, f"{pagina_id}/leadgen_forms", {"fields": "id,name", "limit": 200})
+                if any(str(e.get("name", "")).strip().lower() == nome.strip().lower() for e in existentes):
+                    raise MetaError(f"Já existe um formulário chamado '{nome}' nesta página. Escolha outro nome. Nada foi criado.")
+                dados = {"name": nome, "locale": idioma, "questions": tipos,
+                         "privacy_policy": {"url": politica_privacidade_url, "link_text": "Política de privacidade"},
+                         "thank_you_page": {"title": titulo_agradecimento, "body": texto_agradecimento,
+                                            "button_type": "VIEW_WEBSITE" if url_agradecimento else "NONE",
+                                            **({"button_text": "Continuar", "website_url": url_agradecimento} if url_agradecimento else {})},
+                         "follow_up_action_url": url_agradecimento or politica_privacidade_url}
+                r = await _post(pc, f"{pagina_id}/leadgen_forms", dados)
+        msg = f"OK formulário '{nome}' criado (ID {r.get('id')}) com {', '.join(perguntas)}. Use o ID no anúncio de leads."
+        _registrar("criar_formulario_leads", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# Regras automáticas (da própria Meta): só PAUSAR ou AVISAR. Nunca aumentam orçamento.
+_METRICAS_REGRA = {"gasto": ("spent", True), "cpm": ("cpm", True), "cpc": ("cpc", True), "custo_por_resultado": ("cost_per_result", True),
+                   "ctr": ("ctr", False), "frequencia": ("frequency", False), "impressoes": ("impressions", False), "cliques": ("clicks", False),
+                   "alcance": ("reach", False)}
+_ENTIDADE_REGRA = {"campanha": "CAMPAIGN", "conjunto": "ADSET", "anuncio": "AD"}
+_OP_REGRA = {">": "GREATER_THAN", "<": "LESS_THAN"}
+_JANELA_REGRA = {"hoje": "TODAY", "ontem": "YESTERDAY", "3_dias": "LAST_3_DAYS", "7_dias": "LAST_7_DAYS", "14_dias": "LAST_14_DAYS", "30_dias": "LAST_30_DAYS"}
+
+
+@mcp.tool(annotations=_RO)
+async def listar_regras(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
+    """Regras automáticas da conta (da biblioteca de regras da Meta): nome, status, ação e frequência. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            rows = await _get_all(c, f"{conta['act']}/adrules_library", {"fields": "id,name,status,evaluation_spec,execution_spec,schedule_spec", "limit": 100})
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "status": r.get("status"),
+                   "acao": (r.get("execution_spec") or {}).get("execution_type"),
+                   "frequencia": (r.get("schedule_spec") or {}).get("schedule_type"),
+                   "condicoes": _scrub(json.dumps((r.get("evaluation_spec") or {}).get("filters"), ensure_ascii=False))[:220]} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} regra(s)\n" + _csv(linhas, ["id", "nome", "status", "acao", "frequencia", "condicoes"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_regra_automatica(
+    nome: Annotated[str, Field(description="Nome da regra.", min_length=1, max_length=200)],
+    entidade: Annotated[Literal["campanha", "conjunto", "anuncio"], Field(description="O que a regra avalia.")],
+    metrica: Annotated[Literal["gasto", "cpm", "cpc", "custo_por_resultado", "ctr", "frequencia", "impressoes", "cliques", "alcance"], Field(description="Métrica avaliada.")],
+    operador: Annotated[Literal[">", "<"], Field(description="Maior ou menor que o valor.")],
+    valor: Annotated[float, Field(description="Valor limite. Dinheiro em reais (ex.: 40 = R$ 40); ctr em %.", ge=0)],
+    janela: Annotated[Literal["hoje", "ontem", "3_dias", "7_dias", "14_dias", "30_dias"], Field(description="Período avaliado.")] = "3_dias",
+    acao: Annotated[Literal["avisar", "pausar"], Field(description="avisar só notifica; pausar desliga o item (exige a permissão 'ativar e pausar').")] = "avisar",
+    gasto_minimo: Annotated[Optional[float], Field(description="Só avalia quem já gastou pelo menos isso (evita pausar por pouco dado).", ge=0)] = None,
+    ativar: Annotated[bool, Field(description="False (padrão) cria a regra DESLIGADA, para você conferir na BM. True já cria ligada (exige 'ativar e pausar').")] = False,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria uma regra automática da Meta que roda todo dia sobre campanhas, conjuntos ou anúncios ativos da conta. Exige a permissão
+    'criar e duplicar'. Só avisa ou pausa: nunca aumenta orçamento. Nasce desligada, a menos que ativar=True. Nada é apagado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if acao == "pausar" or ativar:
+            _exigir("status")
+        campo, dinheiro = _METRICAS_REGRA[metrica]
+        v = round(valor * 100) if dinheiro else valor
+        filtros = [{"field": "entity_type", "value": _ENTIDADE_REGRA[entidade], "operator": "EQUAL"},
+                   {"field": "time_preset", "value": _JANELA_REGRA[janela], "operator": "EQUAL"},
+                   {"field": campo, "value": v, "operator": _OP_REGRA[operador]}]
+        if gasto_minimo is not None and campo != "spent":
+            filtros.append({"field": "spent", "value": round(gasto_minimo * 100), "operator": "GREATER_THAN"})
+        dados = {"name": nome, "status": "ENABLED" if ativar else "DISABLED",
+                 "evaluation_spec": {"evaluation_type": "SCHEDULE", "filters": filtros},
+                 "execution_spec": {"execution_type": "PAUSE" if acao == "pausar" else "NOTIFICATION"},
+                 "schedule_spec": {"schedule_type": "DAILY"}}
+        params = dict(nome=nome, entidade=entidade, metrica=metrica, operador=operador, valor=valor, janela=janela, acao=acao, ativar=ativar)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            existentes = await _get_all(c, f"{conta['act']}/adrules_library", {"fields": "id,name", "limit": 200})
+            if any(str(e.get("name", "")).strip().lower() == nome.strip().lower() for e in existentes):
+                raise MetaError(f"Já existe uma regra chamada '{nome}'. Escolha outro nome. Nada foi criado.")
+            r = await _post(c, f"{conta['act']}/adrules_library", dados)
+        msg = (f"OK regra '{nome}' criada (ID {r.get('id')}) {'LIGADA' if ativar else 'DESLIGADA (ligue na BM depois de conferir)'}: "
+               f"{entidade} com {metrica} {operador} {valor} em {janela} → {acao}.")
+        _registrar("criar_regra_automatica", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+_FONTES_EVENTO = {"site": "website", "whatsapp": "chat", "telefone": "phone_call", "sistema": "system_generated", "outro": "other"}
+_EVENTOS_PADRAO = {"Purchase", "Lead", "CompleteRegistration", "AddToCart", "InitiateCheckout", "ViewContent", "Contact", "Subscribe", "Schedule",
+                   "SubmitApplication", "AddPaymentInfo", "Search", "AddToWishlist", "StartTrial", "PageView"}
+
+
+def _hash_dado(valor: str, tipo: str) -> str:
+    v = str(valor).strip().lower()
+    if tipo == "ph":
+        v = re.sub(r"\D", "", v)
+    return hashlib.sha256(v.encode()).hexdigest()
+
+
+@mcp.tool(annotations=_CRIA)
+async def enviar_eventos_conversao(
+    pixel_id: Annotated[str, Field(description="Pixel/dataset da conta (de listar_pixels).")],
+    eventos: Annotated[list[dict], Field(description=(
+        "Lista de eventos (até 1000). Cada um: evento (Purchase, Lead...), e pelo menos um de email/telefone/fbc; opcionais: valor, moeda (BRL), "
+        "quando (AAAA-MM-DD HH:MM, até 7 dias atrás; vazio = agora), id_evento (evita duplicar com o pixel do site), fonte (site, whatsapp, telefone, sistema, outro), url."),
+        min_length=1, max_length=1000)],
+    codigo_teste: Annotated[Optional[str], Field(description="Código da aba 'Testar eventos' da Meta. Com ele os eventos só aparecem no teste, não entram nos relatórios.")] = None,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Envia vendas, leads e outros eventos do servidor para o pixel da conta (API de Conversões), por exemplo compras fechadas no
+    WhatsApp. E-mail e telefone em texto puro são convertidos em hash SHA-256 aqui no computador, nada sai em claro. Exige a permissão
+    'criar e duplicar'. SEM codigo_teste os eventos são REAIS e passam a contar nos relatórios e na otimização: o Claude deve confirmar com o
+    usuário antes. Não apaga nada."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if not re.fullmatch(r"\d{5,25}", str(pixel_id)):
+            raise MetaError(f"ID de pixel inválido: {pixel_id!r}.")
+        agora = datetime.now(timezone.utc)
+        dados, avisos = [], []
+        for i, e in enumerate(eventos, 1):
+            desc = f"Evento {i}"
+            nome_ev = str(e.get("evento") or "").strip()
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,49}", nome_ev):
+                raise MetaError(f"{desc}: 'evento' inválido ({nome_ev!r}). Padrões: {', '.join(sorted(_EVENTOS_PADRAO))}.")
+            ud: dict = {}
+            if e.get("email"):
+                ud["em"] = [_hash_dado(e["email"], "em")]
+            if e.get("telefone"):
+                if len(re.sub(r"\D", "", str(e["telefone"]))) < 8:
+                    raise MetaError(f"{desc}: telefone curto demais. Use DDI+DDD+número (ex.: 5511999998888).")
+                ud["ph"] = [_hash_dado(e["telefone"], "ph")]
+            if e.get("fbc"):
+                ud["fbc"] = str(e["fbc"])
+            if not ud:
+                raise MetaError(f"{desc}: informe email, telefone ou fbc, senão a Meta não consegue associar o evento a ninguém.")
+            quando = agora
+            if e.get("quando"):
+                try:
+                    quando = datetime.strptime(str(e["quando"]), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    raise MetaError(f"{desc}: 'quando' precisa ser AAAA-MM-DD HH:MM (horário UTC).")
+            if quando < agora - timedelta(days=7) or quando > agora + timedelta(minutes=5):
+                raise MetaError(f"{desc}: a Meta só aceita eventos dos últimos 7 dias, e não do futuro.")
+            fonte = _FONTES_EVENTO.get(str(e.get("fonte") or "site").lower())
+            if not fonte:
+                raise MetaError(f"{desc}: fonte inválida. Use: {', '.join(_FONTES_EVENTO)}.")
+            ev = {"event_name": nome_ev, "event_time": int(quando.timestamp()), "action_source": fonte, "user_data": ud}
+            if e.get("id_evento"):
+                ev["event_id"] = str(e["id_evento"])
+            if fonte == "website":
+                if not e.get("url"):
+                    raise MetaError(f"{desc}: fonte 'site' exige a url da página (ou use fonte 'whatsapp', 'telefone' ou 'sistema').")
+                ev["event_source_url"] = str(e["url"])
+            if e.get("valor") is not None:
+                ev["custom_data"] = {"value": float(e["valor"]), "currency": str(e.get("moeda") or "BRL").upper()}
+            elif nome_ev == "Purchase":
+                avisos.append(f"{desc}: Purchase sem valor (não conta para ROAS).")
+            dados.append(ev)
+        params = dict(pixel_id=pixel_id, eventos=len(dados), teste=bool(codigo_teste), tipos=sorted({d["event_name"] for d in dados}))
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+            if str(pixel_id) not in {str(p.get("id")) for p in pixels}:
+                raise MetaError(f"O pixel {pixel_id} não é da conta {conta['id']}. Use listar_pixels. Nada foi enviado.")
+            corpo = {"data": dados}
+            if codigo_teste:
+                corpo["test_event_code"] = codigo_teste
+            r = await _post(c, f"{pixel_id}/events", corpo)
+        msg = (f"OK {r.get('events_received', len(dados))} evento(s) recebido(s) pela Meta no pixel {pixel_id}"
+               + (" em MODO TESTE (não entram nos relatórios)." if codigo_teste else ". Eles passam a contar nos relatórios em minutos.")
+               + (" Avisos: " + " ".join(avisos[:5]) if avisos else ""))
+        _registrar("enviar_eventos_conversao", str(pixel_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
     except Exception as e:
         return _tool_error(e)
 

@@ -37,6 +37,7 @@ rodar "ferramentas avançadas: campanha/conjunto completos, públicos, criativos
 rodar "leituras: diagnóstico, log, prévia, criativos, Instagram, biblioteca, pixel, conversões, comparação" "$PY" testes/test_leituras.py .
 rodar "conversão personalizada, catálogos e testes A/B" "$PY" testes/test_catalogos.py .
 rodar "várias contas por cliente: padrão + liberadas, recusa das outras, histórico" "$PY" testes/test_contas.py .
+rodar "leads, regras automáticas e API de Conversões" "$PY" testes/test_leads_regras_capi.py .
 rodar "públicos de lista: lotes, valor, simulação, arquivo sem hash, falha no meio" "$PY" testes/test_publicos.py .
 rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

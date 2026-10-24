@@ -122,6 +122,11 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `listar_catalogos`, `listar_conjuntos_produtos`, `listar_produtos`, `diagnosticar_catalogo` | Leitura | Catálogos, conjuntos de produtos, produtos e saúde dos feeds. |
 | `listar_testes_ab` | Leitura | Testes A/B da conta. |
 | `criar_conversao_personalizada` | Criar e duplicar | Conversão por trecho de URL, ligada a um pixel da conta. |
+| `listar_formularios`, `baixar_leads` | Leitura | Formulários da página e download dos leads em CSV (amostra mascarada). |
+| `criar_formulario_leads` | Criar e duplicar | Formulário instantâneo com perguntas, política de privacidade e tela final. |
+| `listar_regras` | Leitura | Regras automáticas da conta. |
+| `criar_regra_automatica` | Criar e duplicar (+ ativar e pausar se pausa ou liga) | Regra que avisa ou pausa; nasce desligada. |
+| `enviar_eventos_conversao` | Criar e duplicar | API de Conversões: vendas e leads do servidor para o pixel, com hash local. |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 
