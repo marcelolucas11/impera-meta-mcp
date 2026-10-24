@@ -1220,6 +1220,7 @@ PERMISSOES = {
     "orcamento": "orçamentos e lances",
     "editar": "renomear e editar (segmentação, públicos, datas)",
     "criar": "criar e duplicar (sempre pausado)",
+    "bm": "administrar a BM (dar acesso limitado a contas e páginas)",
 }
 _ESTRATEGIAS = {
     "menor_custo": "LOWEST_COST_WITHOUT_CAP",
@@ -4009,6 +4010,755 @@ async def enviar_eventos_conversao(
                + (" Avisos: " + " ".join(avisos[:5]) if avisos else ""))
         _registrar("enviar_eventos_conversao", str(pixel_id), params, True, msg)
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+
+# ───────────────────────── 6.5.0: teste A/B, catálogo (escrita), criativos PAC/MMU/Advantage+, pixel, comentários, BM, benchmark interno ─────────────────────────
+
+# ── Teste A/B ──
+@mcp.tool(annotations=_CRIA)
+async def criar_teste_ab(
+    celulas: Annotated[list[dict], Field(description=(
+        "2 a 5 variantes. Cada uma: {\"nome\": \"Controle\", \"id\": \"<ID de campanha, conjunto OU anúncio>\"}. Todas do mesmo tipo e da mesma conta."),
+        min_length=2, max_length=5)],
+    nome: Annotated[Optional[str], Field(description="Nome do teste.", max_length=200)] = None,
+    inicio: Annotated[Optional[str], Field(description="Início AAAA-MM-DD (a partir de amanhã). Vazio: amanhã.")] = None,
+    fim: Annotated[Optional[str], Field(description="Fim AAAA-MM-DD. Vazio: 7 dias depois do início.")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um teste A/B (split test) da Meta entre campanhas, conjuntos ou anúncios que já existem. Divide o público em partes iguais.
+    Exige a permissão 'criar e duplicar'. Não cria gasto novo: só compara o que já roda. Nada é apagado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        hoje = date.today()
+        d1 = _parse_date(inicio, "inicio") if inicio else hoje + timedelta(days=1)
+        d2 = _parse_date(fim, "fim") if fim else d1 + timedelta(days=7)
+        if d1 <= hoje:
+            raise MetaError("O teste precisa começar a partir de amanhã.")
+        if d2 <= d1:
+            raise MetaError("'fim' precisa ser depois de 'inicio'.")
+        nomes, ids = [], []
+        for i, ce in enumerate(celulas, 1):
+            n, ident = str(ce.get("nome") or "").strip(), str(ce.get("id") or "").strip()
+            if not n or not ident:
+                raise MetaError(f"Variante {i}: informe 'nome' e 'id'.")
+            nomes.append(n); ids.append(ident)
+        if len({x.lower() for x in nomes}) != len(nomes) or len(set(ids)) != len(ids):
+            raise MetaError("Nomes e IDs das variantes não podem se repetir.")
+        params = dict(celulas=[{"nome": a, "id": b} for a, b in zip(nomes, ids)], inicio=d1.isoformat(), fim=d2.isoformat(), nome=nome)
+        async with _client() as c:
+            tipos, contas = set(), set()
+            for ident in ids:
+                obj, tipo, conta_obj = await _objeto(c, ident)
+                tipos.add(tipo); contas.add(conta_obj["id"])
+            if len(tipos) != 1 or len(contas) != 1:
+                raise MetaError("Todas as variantes precisam ser do mesmo tipo (campanha, conjunto ou anúncio) e da mesma conta. Nada foi criado.")
+            tipo = tipos.pop()
+            conta = await _conta_padrao(c, contas.pop())
+            campo = {"campaign": "campaigns", "adset": "adsets", "ad": "ads"}[tipo]
+            pct = round(100 / len(ids), 2)
+            cels = [{"name": n, "treatment_percentage": pct, campo: [i]} for n, i in zip(nomes, ids)]
+            dados = {"name": nome or f"Teste A/B {d1.isoformat()}", "type": "SPLIT_TEST", "cells": cels,
+                     "start_time": f"{d1.isoformat()}T00:00:00", "end_time": f"{d2.isoformat()}T00:00:00"}
+            r = await _post(c, f"{conta['act']}/ad_studies", dados)
+        msg = f"OK teste A/B criado (ID {r.get('id')}) com {len(ids)} variantes de {_TIPO_PT.get(tipo, tipo)}, de {d1} a {d2}. Veja o resultado com listar_testes_ab."
+        _registrar("criar_teste_ab", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── Catálogo (escrita) ──
+async def _feed_do_catalogo(c: httpx.AsyncClient, catalogo_id: str, feed_id: str) -> dict:
+    feeds = await _get_all(c, f"{catalogo_id}/product_feeds", {"fields": "id,name", "limit": 50})
+    f = next((x for x in feeds if str(x.get("id")) == str(feed_id)), None)
+    if not f:
+        raise MetaError(f"O feed {feed_id} não é do catálogo {catalogo_id}. Use diagnosticar_catalogo para ver os feeds.")
+    return f
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_catalogo(
+    nome: Annotated[str, Field(description="Nome do catálogo.", min_length=1, max_length=100)],
+    vertical: Annotated[Literal["commerce", "vehicles", "hotels", "home_listings", "flights", "destinations"], Field(description="Tipo de catálogo.")] = "commerce",
+    confirmar_novo: Annotated[bool, Field(description="Já existe catálogo na conta? A Meta recomenda UM só. True confirma que quer outro mesmo assim.")] = False,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria um catálogo vazio na BM do cliente (exige META_BUSINESS_ID na ficha) e o liga à conta de anúncios. Exige 'criar e duplicar'.
+    Recusa criar um segundo catálogo sem confirmar_novo=True, porque catálogos duplicados fragmentam os sinais e pioram a entrega."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        biz = re.sub(r"\D", "", _cfg("META_BUSINESS_ID"))
+        if not biz:
+            raise MetaError("A ficha do cliente não tem o ID da BM (META_BUSINESS_ID). Preencha no app para criar catálogos.")
+        params = dict(nome=nome, vertical=vertical)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            atuais = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name", "limit": 50})
+            if any(str(a.get("name", "")).strip().lower() == nome.strip().lower() for a in atuais):
+                raise MetaError(f"Já existe um catálogo chamado '{nome}'. Nada foi criado.")
+            if atuais and not confirmar_novo:
+                raise MetaError("A conta já tem catálogo(s): " + "; ".join(f"{a.get('name')} ({a.get('id')})" for a in atuais)
+                                + ". Use um deles ou confirme com confirmar_novo=True. Nada foi criado.")
+            r = await _post(c, f"{biz}/owned_product_catalogs", {"name": nome, "vertical": vertical})
+        msg = (f"OK catálogo '{nome}' criado (ID {r.get('id')}). Falta ligá-lo à conta de anúncios na BM se ele não aparecer em listar_catalogos.")
+        _registrar("criar_catalogo", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_feed_produtos(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")],
+    nome: Annotated[str, Field(description="Nome do feed.", min_length=1, max_length=100)],
+    url: Annotated[str, Field(description="URL https do arquivo CSV/TSV/XML que a Meta vai buscar.")],
+    frequencia: Annotated[Literal["HOURLY", "DAILY", "WEEKLY"], Field(description="De quanto em quanto tempo a Meta busca.")] = "DAILY",
+    hora: Annotated[int, Field(description="Hora do dia (0 a 23) para DAILY/WEEKLY.", ge=0, le=23)] = 6,
+    moeda: Annotated[str, Field(description="Moeda padrão dos preços.")] = "BRL",
+    pais: Annotated[str, Field(description="País do feed.")] = "BR",
+    dia_semana: Annotated[str, Field(description="Dia da semana para WEEKLY (ex.: MONDAY).")] = "MONDAY",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria um feed de produtos num catálogo da conta: a Meta passa a buscar o arquivo na URL, na frequência escolhida. Exige 'criar e duplicar'.
+    Nome repetido é recusado. Feeds com login (usuário e senha) não são aceitos aqui."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if not url.lower().startswith("https://"):
+            raise MetaError("A URL do feed precisa começar com https://.")
+        sched = {"interval": frequencia, "url": url}
+        if frequencia in ("DAILY", "WEEKLY"):
+            sched["hour"] = hora
+        if frequencia == "WEEKLY":
+            sched["day_of_week"] = dia_semana.upper()
+        params = dict(catalogo_id=catalogo_id, nome=nome, url=url, frequencia=frequencia)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            cat = await _catalogo_da_conta(c, conta, catalogo_id)
+            feeds = await _get_all(c, f"{catalogo_id}/product_feeds", {"fields": "id,name", "limit": 50})
+            if any(str(f.get("name", "")).strip().lower() == nome.strip().lower() for f in feeds):
+                raise MetaError(f"Já existe um feed chamado '{nome}' neste catálogo. Nada foi criado.")
+            r = await _post(c, f"{catalogo_id}/product_feeds", {"name": nome, "schedule": sched,
+                                                                  "default_currency": moeda.upper(), "country": pais.upper()})
+        msg = f"OK feed '{nome}' criado (ID {r.get('id')}) no catálogo '{cat.get('name')}', busca {frequencia}. Confira em diagnosticar_catalogo depois da primeira carga."
+        _registrar("criar_feed_produtos", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+_TIPOS_REGRA_FEED = {"mapear_coluna": "mapping_rule", "padrao_se_vazio": "fallback_rule", "maiusculas_minusculas": "letter_case_rule"}
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_regra_feed(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo.")],
+    feed_id: Annotated[str, Field(description="ID do feed (de diagnosticar_catalogo).")],
+    atributo: Annotated[str, Field(description="Campo do catálogo (title, description, availability, price, brand...).", pattern=r"^[a-z_]{2,40}$")],
+    tipo: Annotated[Literal["mapear_coluna", "padrao_se_vazio", "maiusculas_minusculas"], Field(description="mapear_coluna: usa outra coluna do seu arquivo; padrao_se_vazio: valor fixo quando vazio; maiusculas_minusculas: normaliza.")],
+    valor: Annotated[str, Field(description="mapear_coluna: nome da coluna; padrao_se_vazio: o valor; maiusculas_minusculas: to_upper, to_lower, capitalize_all ou capitalize_first.", max_length=200)],
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria uma regra de transformação num feed (ex.: usar a coluna 'desc' como description, ou texto padrão quando vazio). Exige 'criar e duplicar'.
+    Só cria: não altera nem remove regras existentes."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params_regra = {"mapear_coluna": {"map_from": valor}, "padrao_se_vazio": {"user_default_value": valor}, "maiusculas_minusculas": {"type": valor}}[tipo]
+        if tipo == "maiusculas_minusculas" and valor not in ("to_upper", "to_lower", "capitalize_all", "capitalize_first"):
+            raise MetaError("Para maiusculas_minusculas use to_upper, to_lower, capitalize_all ou capitalize_first.")
+        params = dict(catalogo_id=catalogo_id, feed_id=feed_id, atributo=atributo, tipo=tipo, valor=valor)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            await _catalogo_da_conta(c, conta, catalogo_id)
+            await _feed_do_catalogo(c, catalogo_id, feed_id)
+            r = await _post(c, f"{feed_id}/rules", {"attribute": atributo, "rule_type": _TIPOS_REGRA_FEED[tipo], "params": params_regra})
+        msg = f"OK regra {tipo} em '{atributo}' criada no feed {feed_id} (ID {r.get('id')})."
+        _registrar("criar_regra_feed", str(feed_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_conjunto_produtos(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo.")],
+    nome: Annotated[str, Field(description="Nome do conjunto de produtos.", min_length=1, max_length=100)],
+    filtro: Annotated[str, Field(description="Filtro JSON da Meta, ex.: {\"price\":{\"gt\":10000}} ou {\"availability\":{\"eq\":\"in stock\"}}. Confira antes com listar_produtos.")],
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria um conjunto de produtos (dinâmico, por filtro) num catálogo da conta. Exige 'criar e duplicar'. Nome repetido é recusado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        try:
+            f = json.loads(filtro)
+        except ValueError:
+            raise MetaError("filtro precisa ser um JSON válido.")
+        if not isinstance(f, dict) or not f:
+            raise MetaError("filtro precisa ser um objeto JSON não vazio.")
+        params = dict(catalogo_id=catalogo_id, nome=nome, filtro=filtro)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            cat = await _catalogo_da_conta(c, conta, catalogo_id)
+            sets = await _get_all(c, f"{catalogo_id}/product_sets", {"fields": "id,name", "limit": 200})
+            if any(str(s.get("name", "")).strip().lower() == nome.strip().lower() for s in sets):
+                raise MetaError(f"Já existe um conjunto de produtos chamado '{nome}'. Nada foi criado.")
+            r = await _post(c, f"{catalogo_id}/product_sets", {"name": nome, "filter": f})
+        msg = f"OK conjunto de produtos '{nome}' criado (ID {r.get('id')}) no catálogo '{cat.get('name')}'."
+        _registrar("criar_conjunto_produtos", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+_CAMPOS_PRODUTO = {"nome": "title", "descricao": "description", "preco": "price", "estoque": "availability", "condicao": "condition",
+                   "url": "link", "imagem": "image_link", "marca": "brand", "visibilidade": "visibility"}
+_ESTOQUE_OK = {"in stock", "out of stock", "preorder", "available for order", "discontinued"}
+
+
+def _item_produto(i: int, p: dict, criar: bool, moeda: str) -> dict:
+    desc = f"Produto {i}"
+    sku = str(p.get("sku") or "").strip()
+    if not sku:
+        raise MetaError(f"{desc}: informe 'sku' (o ID do produto na sua loja).")
+    d: dict = {"id": sku}
+    desconhecidos = set(p) - set(_CAMPOS_PRODUTO) - {"sku", "moeda"}
+    if desconhecidos:
+        raise MetaError(f"{desc}: campos desconhecidos {sorted(desconhecidos)}. Use: sku, {', '.join(_CAMPOS_PRODUTO)}.")
+    for k, api in _CAMPOS_PRODUTO.items():
+        if p.get(k) is not None:
+            d[api] = str(p[k])
+    if "price" in d:
+        num = _numero(d["price"].replace(",", ".")) if re.search(r"[0-9]", d["price"]) else None
+        if num is None or num < 0:
+            raise MetaError(f"{desc}: preço inválido ({p.get('preco')!r}).")
+        d["price"] = f"{num:.2f} {str(p.get('moeda') or moeda).upper()}"
+    if "availability" in d and d["availability"] not in _ESTOQUE_OK:
+        raise MetaError(f"{desc}: estoque inválido. Use: {', '.join(sorted(_ESTOQUE_OK))}.")
+    if "visibility" in d and d["visibility"] not in ("published", "hidden"):
+        raise MetaError(f"{desc}: visibilidade deve ser published ou hidden.")
+    for k in ("link", "image_link"):
+        if k in d and not d[k].lower().startswith("https://"):
+            raise MetaError(f"{desc}: '{k}' precisa começar com https://.")
+    if criar:
+        faltam = [x for x in ("title", "description", "availability", "price", "link", "image_link") if x not in d]
+        if faltam:
+            raise MetaError(f"{desc} ({sku}): faltam {faltam} para criar o produto.")
+        d.setdefault("condition", "new")
+    elif len(d) < 2:
+        raise MetaError(f"{desc} ({sku}): informe ao menos um campo para atualizar.")
+    return d
+
+
+async def _enviar_produtos(catalogo_id: str, produtos: list, criar: bool, moeda: str, conta_: Optional[str], ferramenta: str, cliente: Optional[str]) -> str:
+    nome_cliente = _usar_cliente(cliente)
+    _exigir("criar" if criar else "editar")
+    itens = [_item_produto(i, p, criar, moeda) for i, p in enumerate(produtos, 1)]
+    skus = [i["id"] for i in itens]
+    if len(set(skus)) != len(skus):
+        raise MetaError("Há SKUs repetidos na lista.")
+    params = dict(catalogo_id=catalogo_id, skus=skus[:25], produtos=len(itens))
+    async with _client() as c:
+        conta = await _conta_padrao(c, conta_)
+        cat = await _catalogo_da_conta(c, conta, catalogo_id)
+        reqs = [{"method": "CREATE" if criar else "UPDATE", "data": i} for i in itens]
+        r = await _post(c, f"{catalogo_id}/items_batch", {"allow_upsert": "true" if criar else "false", "item_type": "PRODUCT_ITEM", "requests": reqs})
+    rejeitados = (r.get("validation_status") or [])
+    ruins = [x for x in rejeitados if x.get("errors")]
+    msg = (f"OK {len(itens)} produto(s) {'criados/atualizados' if criar else 'atualizados'} no catálogo '{cat.get('name')}' (lote {','.join(r.get('handles') or [])}). "
+           "A Meta processa o lote em segundos a minutos; confira com listar_produtos."
+           + (f" ATENÇÃO: {len(ruins)} item(ns) com erro de validação: {_scrub(json.dumps(ruins, ensure_ascii=False))[:300]}" if ruins else "")
+           + " Se um feed também fornece estes produtos, a próxima carga do feed pode desfazer a mudança.")
+    _registrar(ferramenta, str(catalogo_id), params, True, msg)
+    return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+
+
+_PRODUTOS = Annotated[list[dict], Field(description=(
+    "Até 25 produtos. Campos: sku (obrigatório), nome, descricao, preco (ex.: 199,90), moeda, estoque (in stock, out of stock, preorder, "
+    "available for order, discontinued), condicao, url (https), imagem (https), marca, visibilidade (published ou hidden)."), min_length=1, max_length=25)]
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_produtos(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo.")],
+    produtos: _PRODUTOS,
+    moeda: Annotated[str, Field(description="Moeda padrão dos preços.")] = "BRL",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria (ou atualiza, se o SKU já existir) produtos num catálogo da conta. Exige 'criar e duplicar'. Exige nome, descrição, preço, estoque, url e imagem."""
+    try:
+        return await _enviar_produtos(catalogo_id, produtos, True, moeda, conta, "criar_produtos", cliente)
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def atualizar_produtos(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo.")],
+    produtos: _PRODUTOS,
+    moeda: Annotated[str, Field(description="Moeda padrão dos preços.")] = "BRL",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Muda campos de produtos que já existem (preço, estoque, texto, imagem). Para esconder um produto, use visibilidade=hidden; nada é apagado. Exige 'renomear e editar'.
+    SKU que não existe é rejeitado, nunca criado."""
+    try:
+        return await _enviar_produtos(catalogo_id, produtos, False, moeda, conta, "atualizar_produtos", cliente)
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── Criativos avançados: PAC, MMU, Advantage+ e catálogo ──
+_FEATURES_AP = re.compile(r"^[a-z][a-z0-9_]{2,60}$")
+_PLATAFORMAS = {"facebook", "instagram", "messenger", "audience_network"}
+_POS_CAMPOS = {"facebook": "facebook_positions", "instagram": "instagram_positions", "messenger": "messenger_positions", "audience_network": "audience_network_positions"}
+
+
+def _midia(i: int, m: dict, rot: str) -> tuple:
+    h, v = m.get("imagem_hash"), m.get("video_id")
+    if bool(h) == bool(v):
+        raise MetaError(f"{rot} {i}: informe exatamente um entre imagem_hash e video_id (veja listar_midias).")
+    return ("image", str(h)) if h else ("video", str(v))
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_criativo_avancado(
+    nome: Annotated[str, Field(description="Nome do criativo.", min_length=1, max_length=200)],
+    pagina_id: Annotated[str, Field(description="Página do Facebook (de listar_paginas).")],
+    formato: Annotated[Literal["pac", "mmu", "catalogo", "advantage_plus"], Field(description=(
+        "pac: mídias diferentes por posicionamento; mmu: várias mídias e a Meta escolhe; catalogo: carrossel dinâmico de produtos; "
+        "advantage_plus: criativo simples com melhorias automáticas da Meta."))],
+    link: Annotated[Optional[str], Field(description="URL https de destino.")] = None,
+    textos: Annotated[list[str], Field(description="Textos principais (até 5; no pac e advantage_plus só o primeiro conta).", max_length=5)] = [],
+    titulos: Annotated[list[str], Field(description="Títulos (até 5).", max_length=5)] = [],
+    descricoes: Annotated[list[str], Field(description="Descrições (até 5).", max_length=5)] = [],
+    cta: Annotated[str, Field(description="Botão (ex.: SHOP_NOW, LEARN_MORE, WHATSAPP_MESSAGE).")] = "LEARN_MORE",
+    instagram_id: Annotated[Optional[str], Field(description="Perfil do Instagram (de listar_paginas).")] = None,
+    midias: Annotated[list[dict], Field(description=(
+        "mmu: 2 a 10 itens {imagem_hash|video_id}. pac: 2 a 10 itens {imagem_hash|video_id, plataformas: [facebook, instagram...], posicoes: [feed, story, reels...]}; "
+        "exatamente UM item sem plataformas é o padrão (fallback). advantage_plus: 1 item."), max_length=10)] = [],
+    conjunto_produtos_id: Annotated[Optional[str], Field(description="catalogo: ID do conjunto de produtos (de listar_conjuntos_produtos).")] = None,
+    melhorias: Annotated[list[str], Field(description="advantage_plus: nomes das melhorias (ex.: image_touchups, text_optimizations, enhance_cta, image_brightness_and_contrast). Vazio: o conjunto padrão da Meta.")] = [],
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria criativos avançados da Meta (PAC, MMU, catálogo dinâmico, Advantage+) numa conta liberada. Exige 'criar e duplicar'. Só cria o criativo
+    (não gasta nada): use o ID no criar_anuncio (criativo_id). Os formatos seguem a documentação da Meta; como variam por objetivo, a Meta pode recusar
+    uma combinação e o erro dela é repassado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if link and not link.lower().startswith("https://"):
+            raise MetaError("link precisa começar com https://.")
+        if cta not in _CTAS_VALIDOS:
+            raise MetaError(f"Botão inválido: {cta}. Use um destes: {', '.join(sorted(_CTAS_VALIDOS))}.")
+        params = dict(nome=nome, pagina_id=pagina_id, formato=formato, link=link, midias=len(midias), conjunto_produtos_id=conjunto_produtos_id)
+        story = {"page_id": str(pagina_id)}
+        if instagram_id:
+            story["instagram_user_id"] = str(instagram_id)
+        criativo: dict = {"name": nome}
+        if formato in ("pac", "mmu"):
+            if not link and cta not in ("WHATSAPP_MESSAGE", "MESSAGE_PAGE"):
+                raise MetaError("link é obrigatório (exceto botões de mensagem).")
+            if not (2 <= len(midias) <= 10):
+                raise MetaError(f"{formato}: informe de 2 a 10 itens em 'midias'.")
+            if not textos:
+                raise MetaError("Informe ao menos um texto principal em 'textos'.")
+            imagens, videos, regras = [], [], []
+            fallback = 0
+            for i, m in enumerate(midias, 1):
+                tipo_m, ident = _midia(i, m, "Mídia")
+                rotulo = f"m{i}"
+                (imagens if tipo_m == "image" else videos).append(
+                    ({"hash": ident, "adlabels": [{"name": rotulo}]} if tipo_m == "image" else {"video_id": ident, "adlabels": [{"name": rotulo}]}))
+                if formato == "pac":
+                    plats = [str(x).lower() for x in (m.get("plataformas") or [])]
+                    if not plats:
+                        fallback += 1
+                        spec: dict = {}
+                    else:
+                        if not set(plats) <= _PLATAFORMAS:
+                            raise MetaError(f"Mídia {i}: plataformas aceitas: {', '.join(sorted(_PLATAFORMAS))}.")
+                        spec = {"publisher_platforms": plats}
+                        pos = [str(x).lower() for x in (m.get("posicoes") or [])]
+                        if pos and len(plats) != 1:
+                            raise MetaError(f"Mídia {i}: com 'posicoes' use uma única plataforma.")
+                        if pos:
+                            spec[_POS_CAMPOS[plats[0]]] = pos
+                    regras.append({"customization_spec": spec, ("image_label" if tipo_m == "image" else "video_label"): {"name": rotulo}})
+            if formato == "pac" and fallback != 1:
+                raise MetaError("pac: exatamente UMA mídia deve ficar sem 'plataformas' (a padrão, para os demais posicionamentos).")
+            afs: dict = {"bodies": [{"text": t} for t in textos[:5]], "ad_formats": ["SINGLE_IMAGE" if not videos else "SINGLE_VIDEO"] if formato == "pac" else ["AUTOMATIC_FORMAT"],
+                         "call_to_action_types": [cta]}
+            if imagens:
+                afs["images"] = imagens
+            if videos:
+                afs["videos"] = videos
+            if link:
+                afs["link_urls"] = [{"website_url": link}]
+            if titulos:
+                afs["titles"] = [{"text": t} for t in titulos[:5]]
+            if descricoes:
+                afs["descriptions"] = [{"text": t} for t in descricoes[:5]]
+            if formato == "pac":
+                afs["optimization_type"] = "PLACEMENT"
+                afs["asset_customization_rules"] = regras
+                if imagens and videos:
+                    afs["ad_formats"] = ["SINGLE_IMAGE", "SINGLE_VIDEO"]
+            criativo.update(object_story_spec=story, asset_feed_spec=afs)
+        elif formato == "catalogo":
+            if not link:
+                raise MetaError("catalogo: informe o link do site (destino padrão).")
+            if not conjunto_produtos_id:
+                raise MetaError("catalogo: informe conjunto_produtos_id (veja listar_conjuntos_produtos).")
+            if not textos:
+                raise MetaError("Informe ao menos um texto principal em 'textos'.")
+            story["template_data"] = {"message": textos[0], "link": link, "name": "{{product.name}}", "description": "{{product.price}}",
+                                      "call_to_action": {"type": cta}, "multi_share_end_card": False}
+            criativo.update(object_story_spec=story, product_set_id=str(conjunto_produtos_id))
+        else:  # advantage_plus
+            if len(midias) != 1:
+                raise MetaError("advantage_plus: informe exatamente 1 item em 'midias'.")
+            tipo_m, ident = _midia(1, midias[0], "Mídia")
+            if tipo_m == "video":
+                raise MetaError("advantage_plus: use uma imagem (imagem_hash). Para vídeo, crie com criar_criativo e ligue melhorias pela BM.")
+            if not (link and textos):
+                raise MetaError("advantage_plus: informe link e ao menos um texto.")
+            ld = {"image_hash": ident, "link": link, "message": textos[0], "call_to_action": {"type": cta, "value": {"link": link}}}
+            if titulos:
+                ld["name"] = titulos[0]
+            if descricoes:
+                ld["description"] = descricoes[0]
+            story["link_data"] = ld
+            feats = melhorias or ["image_touchups", "text_optimizations", "image_brightness_and_contrast", "enhance_cta"]
+            if any(not _FEATURES_AP.match(f) for f in feats):
+                raise MetaError("Nome de melhoria inválido: use letras minúsculas e _ (ex.: image_touchups).")
+            criativo.update(object_story_spec=story, degrees_of_freedom_spec={"creative_features_spec": {f: {"enroll_status": "OPT_IN"} for f in feats}})
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            await _pagina_da_conta(c, conta, pagina_id)
+            if conjunto_produtos_id:
+                cats = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id", "limit": 50})
+                achado = False
+                for cat in cats:
+                    sets = await _get_all(c, f"{cat['id']}/product_sets", {"fields": "id", "limit": 200})
+                    if str(conjunto_produtos_id) in {str(s.get('id')) for s in sets}:
+                        achado = True
+                        break
+                if not achado:
+                    raise MetaError(f"O conjunto de produtos {conjunto_produtos_id} não é de um catálogo da conta. Use listar_conjuntos_produtos.")
+            r = await _post(c, f"{conta['act']}/adcreatives", criativo)
+        msg = f"OK criativo {formato.upper()} '{nome}' criado (criativo_id={r.get('id')}). Use esse ID em criar_anuncio (criativo_id)."
+        _registrar("criar_criativo_avancado", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── Pixel ──
+@mcp.tool(annotations=_CRIA)
+async def criar_pixel(
+    nome: Annotated[str, Field(description="Nome do pixel/dataset.", min_length=1, max_length=100)],
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Cria um pixel (dataset) na conta de anúncios, se ela ainda não tiver um com esse nome. Exige 'criar e duplicar'. A Meta permite poucos pixels por conta.
+    Regras de eventos por clique ou URL (Events Setup) NÃO existem na API pública: configure-as na BM ou no código do site."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            atuais = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+            if any(str(p.get("name", "")).strip().lower() == nome.strip().lower() for p in atuais):
+                raise MetaError(f"Já existe um pixel chamado '{nome}'. Nada foi criado.")
+            r = await _post(c, f"{conta['act']}/adspixels", {"name": nome})
+        msg = f"OK pixel '{nome}' criado (ID {r.get('id')}). Instale o código no site e teste com diagnosticar_pixel."
+        _registrar("criar_pixel", str(r.get("id")), dict(nome=nome), True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── Comentários dos anúncios e posts ──
+async def _post_do_anuncio(c: httpx.AsyncClient, anuncio_id: str) -> str:
+    obj, tipo, _conta = await _objeto(c, anuncio_id, "creative{effective_object_story_id,effective_instagram_media_id}")
+    if tipo != "ad":
+        raise MetaError("anuncio_id precisa ser um anúncio.")
+    cr = obj.get("creative") or {}
+    pid = cr.get("effective_object_story_id") or cr.get("effective_instagram_media_id")
+    if not pid:
+        raise MetaError("Esse anúncio não tem post associado ainda (ou o criativo não usa um post).")
+    return str(pid)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_comentarios(
+    pagina_id: Annotated[str, Field(description="Página dona do post (de listar_paginas).")],
+    anuncio_id: Annotated[Optional[str], Field(description="Anúncio da conta: lê os comentários do post dele.")] = None,
+    post_id: Annotated[Optional[str], Field(description="Post do Facebook ({pagina}_{post}) ou mídia do Instagram, se não usar anuncio_id.")] = None,
+    plataforma: Annotated[Literal["facebook", "instagram"], Field(description="Onde está o post.")] = "facebook",
+    limite: Annotated[int, Field(description="Máximo de comentários.", ge=1, le=200)] = 50,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Comentários de um anúncio ou post (inclui posts de anúncio, que não aparecem na página). Só lê. Mostra se já estão ocultos."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        if bool(anuncio_id) == bool(post_id):
+            raise MetaError("Informe anuncio_id OU post_id.")
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            pid = await _post_do_anuncio(c, anuncio_id) if anuncio_id else str(post_id)
+            if plataforma == "facebook" and not pid.startswith(f"{pagina_id}_"):
+                raise MetaError(f"O post {pid} não é da página {pagina_id}.")
+            campos = "id,message,from,created_time,is_hidden,can_hide,comment_count" if plataforma == "facebook" else "id,text,username,timestamp,hidden,like_count"
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                dados = await _get(pc, f"{pid}/comments", {"fields": campos, "limit": limite})
+        rows = (dados.get("data") or [])[:limite]
+        if plataforma == "facebook":
+            linhas = [{"id": r.get("id"), "quando": (r.get("created_time") or "")[:16], "autor": (r.get("from") or {}).get("name"),
+                       "texto": (r.get("message") or "").replace("\n", " ")[:200], "oculto": "sim" if r.get("is_hidden") else "não", "respostas": r.get("comment_count")} for r in rows]
+        else:
+            linhas = [{"id": r.get("id"), "quando": (r.get("timestamp") or "")[:16], "autor": r.get("username"),
+                       "texto": (r.get("text") or "").replace("\n", " ")[:200], "oculto": "sim" if r.get("hidden") else "não", "respostas": None} for r in rows]
+        return f"Cliente: {nome_cliente} | Post {pid} | {len(linhas)} comentário(s)\n" + _csv(linhas, ["id", "quando", "autor", "texto", "oculto", "respostas"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def moderar_comentario(
+    comentario_id: Annotated[str, Field(description="ID do comentário (de listar_comentarios).")],
+    pagina_id: Annotated[str, Field(description="Página dona do post.")],
+    ocultar: Annotated[bool, Field(description="True oculta o comentário (só você e quem escreveu veem); False volta a mostrar.")] = True,
+    plataforma: Annotated[Literal["facebook", "instagram"], Field(description="Onde está o comentário.")] = "facebook",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Oculta ou volta a mostrar um comentário de anúncio ou post. Reversível: NUNCA apaga. Exige 'renomear e editar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        if not re.fullmatch(r"[0-9_]{5,60}", str(comentario_id)):
+            raise MetaError(f"ID de comentário inválido: {comentario_id!r}.")
+        params = dict(comentario_id=comentario_id, ocultar=ocultar, plataforma=plataforma)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                campo = "is_hidden" if plataforma == "facebook" else "hide"
+                if plataforma == "facebook":
+                    dono = await _get(pc, str(comentario_id), {"fields": "id,post{id}"})
+                    pid = str((dono.get("post") or {}).get("id") or "")
+                    if pid and not pid.startswith(f"{pagina_id}_"):
+                        raise MetaError(f"O comentário {comentario_id} não é de um post da página {pagina_id}. Nada foi alterado.")
+                await _post(pc, str(comentario_id), {campo: ocultar})
+        msg = f"OK comentário {comentario_id} {'ocultado' if ocultar else 'visível de novo'}."
+        _registrar("moderar_comentario", str(comentario_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def responder_comentario(
+    comentario_id: Annotated[str, Field(description="ID do comentário a responder.")],
+    pagina_id: Annotated[str, Field(description="Página dona do post (responde como a página).")],
+    texto: Annotated[str, Field(description="Resposta pública.", min_length=1, max_length=1000)],
+    plataforma: Annotated[Literal["facebook", "instagram"], Field(description="Onde está o comentário.")] = "facebook",
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Responde publicamente a um comentário, como a página. Exige 'criar e duplicar'. A resposta fica visível a todos e não pode ser desfeita por esta ferramenta:
+    o Claude deve mostrar o texto ao usuário antes."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if not re.fullmatch(r"[0-9_]{5,60}", str(comentario_id)):
+            raise MetaError(f"ID de comentário inválido: {comentario_id!r}.")
+        params = dict(comentario_id=comentario_id, plataforma=plataforma, texto=texto)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            async with _cliente_pagina(c, conta, pagina_id) as pc:
+                if plataforma == "facebook":
+                    dono = await _get(pc, str(comentario_id), {"fields": "id,post{id}"})
+                    pid = str((dono.get("post") or {}).get("id") or "")
+                    if pid and not pid.startswith(f"{pagina_id}_"):
+                        raise MetaError(f"O comentário {comentario_id} não é de um post da página {pagina_id}. Nada foi enviado.")
+                    r = await _post(pc, f"{comentario_id}/comments", {"message": texto})
+                else:
+                    r = await _post(pc, f"{comentario_id}/replies", {"message": texto})
+        msg = f"OK resposta publicada (ID {r.get('id')})."
+        _registrar("responder_comentario", str(comentario_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── BM: leitura e atribuição de acesso (permissão própria 'bm') ──
+def _biz_id() -> str:
+    b = re.sub(r"\D", "", _cfg("META_BUSINESS_ID"))
+    if not b:
+        raise MetaError("A ficha do cliente não tem o ID da BM (META_BUSINESS_ID). Preencha no app.")
+    return b
+
+
+@mcp.tool(annotations=_RO)
+async def listar_usuarios_bm(cliente: _CLIENTE = None) -> str:
+    """Pessoas e usuários do sistema da BM do cliente, com a função de cada um. Só lê. Exige o ID da BM na ficha e business_management no token."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        biz = _biz_id()
+        async with _client() as c:
+            pessoas = await _get_all(c, f"{biz}/business_users", {"fields": "id,name,email,role", "limit": 100})
+            try:
+                sis = await _get_all(c, f"{biz}/system_users", {"fields": "id,name,role", "limit": 100})
+            except MetaError:
+                sis = []
+        linhas = [{"tipo": "pessoa", "id": p.get("id"), "nome": p.get("name"), "email": _mascara(p.get("email") or ""), "funcao": p.get("role")} for p in pessoas]
+        linhas += [{"tipo": "sistema", "id": s.get("id"), "nome": s.get("name"), "email": None, "funcao": s.get("role")} for s in sis]
+        return f"Cliente: {nome_cliente} | BM {biz} | {len(linhas)} usuário(s)\n" + _csv(linhas, ["tipo", "id", "nome", "email", "funcao"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_ativos_bm(cliente: _CLIENTE = None) -> str:
+    """Ativos da BM do cliente: contas de anúncios, páginas, pixels e catálogos que ela possui. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        biz = _biz_id()
+        arestas = [("conta de anúncios", "owned_ad_accounts", "id,name"), ("página", "owned_pages", "id,name"),
+                   ("pixel", "owned_pixels", "id,name"), ("catálogo", "owned_product_catalogs", "id,name")]
+        linhas, avisos = [], []
+        async with _client() as c:
+            for rot, aresta, campos in arestas:
+                try:
+                    for r in await _get_all(c, f"{biz}/{aresta}", {"fields": campos, "limit": 100}):
+                        linhas.append({"tipo": rot, "id": r.get("id"), "nome": r.get("name")})
+                except MetaError as e:
+                    avisos.append(f"{rot}: {e}")
+        return (f"Cliente: {nome_cliente} | BM {biz} | {len(linhas)} ativo(s)\n" + "".join(f"AVISO: {a}\n" for a in avisos)
+                + _csv(linhas, ["tipo", "id", "nome"]))
+    except Exception as e:
+        return _tool_error(e)
+
+
+_TAREFAS_CONTA = {"analisar": "ANALYZE", "anunciar": "ADVERTISE", "rascunhar": "DRAFT"}
+_TAREFAS_PAGINA = {"analisar": "ANALYZE", "anunciar": "ADVERTISE", "criar_conteudo": "CREATE_CONTENT", "moderar": "MODERATE"}
+
+
+@mcp.tool(annotations=_CRIA)
+async def dar_acesso_ativo(
+    tipo_ativo: Annotated[Literal["conta_anuncios", "pagina"], Field(description="O que compartilhar.")],
+    ativo_id: Annotated[str, Field(description="ID da conta de anúncios (liberada ao cliente) ou da página (de listar_paginas).")],
+    usuario_id: Annotated[str, Field(description="ID do usuário da BM (de listar_usuarios_bm).")],
+    tarefas: Annotated[list[str], Field(description="Conta: analisar, anunciar, rascunhar. Página: analisar, anunciar, criar_conteudo, moderar. Controle total e funções de administrador NÃO são oferecidos.", min_length=1, max_length=4)],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Dá a um usuário da BM do cliente acesso LIMITADO (analisar, anunciar, rascunhar etc.) a uma conta de anúncios ou página que o cliente já usa.
+    Exige a permissão própria 'administrar a BM'. Nunca dá controle total, nunca cria administradores, nunca remove acessos."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("bm")
+        biz = _biz_id()
+        mapa = _TAREFAS_CONTA if tipo_ativo == "conta_anuncios" else _TAREFAS_PAGINA
+        tk = []
+        for t in tarefas:
+            k = t.strip().lower()
+            if k not in mapa:
+                raise MetaError(f"Tarefa '{t}' não permitida para {tipo_ativo}. Opções: {', '.join(mapa)}.")
+            tk.append(mapa[k])
+        if not re.fullmatch(r"\d{5,25}", str(usuario_id)) or not re.fullmatch(r"\d{5,25}", re.sub(r"\D", "", str(ativo_id))):
+            raise MetaError("IDs inválidos.")
+        params = dict(tipo_ativo=tipo_ativo, ativo_id=ativo_id, usuario_id=usuario_id, tarefas=tk)
+        async with _client() as c:
+            pessoas = await _get_all(c, f"{biz}/business_users", {"fields": "id,name", "limit": 200})
+            sis = []
+            try:
+                sis = await _get_all(c, f"{biz}/system_users", {"fields": "id,name", "limit": 200})
+            except MetaError:
+                pass
+            alvo = next((u for u in pessoas + sis if str(u.get("id")) == str(usuario_id)), None)
+            if not alvo:
+                raise MetaError(f"O usuário {usuario_id} não é da BM {biz}. Use listar_usuarios_bm. Nada foi alterado.")
+            if tipo_ativo == "conta_anuncios":
+                conta = await _conta_padrao(c, ativo_id)
+                caminho = f"{conta['act']}/assigned_users"
+                rot = f"conta {conta['nome']} ({conta['id']})"
+            else:
+                conta = await _conta_padrao(c)
+                await _pagina_da_conta(c, conta, ativo_id)
+                caminho = f"{ativo_id}/assigned_users"
+                rot = f"página {ativo_id}"
+            await _post(c, caminho, {"user": str(usuario_id), "tasks": tk})
+        msg = f"OK {alvo.get('name')} agora tem acesso ({', '.join(tarefas)}) à {rot}. Para tirar o acesso, use a BM."
+        _registrar("dar_acesso_ativo", str(ativo_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | BM {biz}\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ── Benchmark interno (os benchmarks de setor da Meta não existem na API pública) ──
+_BENCH_METRICAS = [("cpm", "menor"), ("ctr_link", "maior"), ("cpc_link", "menor"), ("cpa", "menor"), ("roas", "maior")]
+
+
+@mcp.tool(annotations=_RO)
+async def benchmark_interno(
+    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Vazio: 7 dias terminando ontem (se o cliente exige período, é obrigatório).")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD.")] = None,
+    nivel: Annotated[Literal["campanha", "conjunto", "anuncio"], Field(description="O que comparar entre si.")] = "anuncio",
+    gasto_minimo: Annotated[float, Field(description="Ignora quem gastou menos que isso (pouco dado).", ge=0)] = 50,
+    conta: Annotated[Optional[str], Field(description="ID da conta ou trecho do nome. Vazio: conta padrão.")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Compara cada campanha, conjunto ou anúncio com a MEDIANA da própria conta no período (CPM, CTR, CPC, CPA e ROAS) e marca quem está pior
+    ou melhor que o normal da conta. NÃO é o benchmark de setor da Meta (esse é proprietário e não existe na API pública): é um comparativo interno,
+    útil para achar o que puxa a conta para baixo ou para cima. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _checar_periodo(desde, ate)
+        d1, d2 = _periodo(desde, ate)
+        level = NIVEIS[nivel]
+        avisos: list = []
+        async with _client() as c:
+            acc = await _resolve_account(c, conta)
+            rows = await _insights(c, acc["act"], level, d1, d2, False, [], asyncio.Semaphore(MAX_SIMULTANEAS), None, avisos)
+        base = [r for r in rows if (r.get("gasto") or 0) >= gasto_minimo]
+        if len(base) < 3:
+            return (f"Cliente: {nome_cliente} | Conta: {acc['nome']} | {d1} a {d2}\nSó {len(base)} item(ns) com gasto de pelo menos {gasto_minimo:.0f}: pouco para comparar. "
+                    "Reduza o gasto_minimo ou aumente o período.")
+        def med(k):
+            v = sorted(r[k] for r in base if r.get(k) is not None)
+            if not v:
+                return None
+            m = len(v) // 2
+            return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2
+        medianas = {k: med(k) for k, _ in _BENCH_METRICAS}
+        nome_col = {"campaign": "campanha", "adset": "conjunto", "ad": "anuncio"}[level]
+        linhas = []
+        for r in sorted(base, key=lambda x: -(x.get("gasto") or 0)):
+            lin = {nome_col: r.get(nome_col), "id": r.get(nome_col + "_id"), "gasto": r.get("gasto")}
+            piores = melhores = 0
+            for k, bom in _BENCH_METRICAS:
+                v, m = r.get(k), medianas[k]
+                lin[k] = v
+                if v is None or not m:
+                    lin[k + "_vs_mediana_pct"] = None
+                    continue
+                dif = round((v - m) / m * 100, 1)
+                lin[k + "_vs_mediana_pct"] = dif
+                melhor = dif < -25 if bom == "menor" else dif > 25
+                pior = dif > 25 if bom == "menor" else dif < -25
+                melhores += melhor; piores += pior
+            lin["leitura"] = "acima do normal da conta" if melhores > piores else ("abaixo do normal da conta" if piores > melhores else "na média")
+            linhas.append(lin)
+        cols = [nome_col, "id", "gasto"] + [x for k, _ in _BENCH_METRICAS for x in (k, k + "_vs_mediana_pct")] + ["leitura"]
+        topo = [f"Cliente: {nome_cliente} | Conta: {acc['nome']} ({acc['id']}) | {d1} a {d2} | {len(base)} {nivel}(s) com gasto ≥ {gasto_minimo:.0f}",
+                "Medianas da conta: " + "; ".join(f"{k} {medianas[k]:.2f}" for k, _ in _BENCH_METRICAS if medianas[k] is not None),
+                "Comparativo INTERNO (não é benchmark de setor). Diferença de mais de 25% em cada métrica conta como melhor ou pior; em CPM, CPC e CPA, menor é melhor."]
+        topo += [f"AVISO: {a}" for a in avisos]
+        return "\n".join(topo) + "\n\n" + _csv(linhas, cols)
     except Exception as e:
         return _tool_error(e)
 

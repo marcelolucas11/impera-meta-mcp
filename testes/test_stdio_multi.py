@@ -13,8 +13,8 @@ send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}); tools = recv()["result"]["tools"]
 print("ferramentas:", [t["name"] for t in tools])
 assert all("cliente" in t["inputSchema"].get("properties", {}) for t in tools if t["name"] != "listar_clientes")
-escrita = {t["name"]: t.get("annotations") or {} for t in tools if t["name"] in ("alterar_status", "alterar_orcamento", "renomear", "duplicar", "criar_campanha", "criar_conjunto", "criar_anuncio", "criar_publico_lista", "criar_publico_site", "criar_publico_engajamento", "criar_publico_semelhante", "alterar_publico", "atualizar_publico_lista", "atualizar_conjunto", "atualizar_campanha", "criar_criativo", "enviar_video", "criar_conversao_personalizada", "criar_formulario_leads", "criar_regra_automatica", "enviar_eventos_conversao")}
-assert len(escrita) == 21 and all(a.get("readOnlyHint") is False for a in escrita.values()), escrita
+escrita = {t["name"]: t.get("annotations") or {} for t in tools if t["name"] in ("alterar_status", "alterar_orcamento", "renomear", "duplicar", "criar_campanha", "criar_conjunto", "criar_anuncio", "criar_publico_lista", "criar_publico_site", "criar_publico_engajamento", "criar_publico_semelhante", "alterar_publico", "atualizar_publico_lista", "atualizar_conjunto", "atualizar_campanha", "criar_criativo", "enviar_video", "criar_conversao_personalizada", "criar_formulario_leads", "criar_regra_automatica", "enviar_eventos_conversao", "criar_teste_ab", "criar_catalogo", "criar_feed_produtos", "criar_regra_feed", "criar_conjunto_produtos", "criar_produtos", "atualizar_produtos", "criar_criativo_avancado", "criar_pixel", "moderar_comentario", "responder_comentario", "dar_acesso_ativo")}
+assert len(escrita) == 33 and all(a.get("readOnlyHint") is False for a in escrita.values()), escrita
 print("ferramentas de alteração marcadas como não somente leitura:", sorted(escrita))
 # 6 chamadas disparadas de uma vez, alternando clientes
 for i in range(6):
@@ -28,4 +28,4 @@ for _ in range(6):
 print("respostas na ordem de chegada:", " ".join(ordem))
 send({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {}}})
 print("sem cliente ->", recv()["result"]["content"][0]["text"][:95])
-p.terminate(); assert ok and len(tools) == 51, len(tools); print("OK")
+p.terminate(); assert ok and len(tools) == 67, len(tools); print("OK")

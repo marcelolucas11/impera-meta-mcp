@@ -331,14 +331,18 @@ const NOMES_ACAO = { alterar_status: "Ativar/pausar", alterar_orcamento: "Orçam
   criar_publico_engajamento: "Público de engajamento", criar_publico_semelhante: "Público semelhante", alterar_publico: "Editar público",
   atualizar_publico_lista: "Atualizar lista do público", atualizar_conjunto: "Editar conjunto", atualizar_campanha: "Editar campanha",
   criar_conversao_personalizada: "Conversão personalizada", criar_formulario_leads: "Formulário de leads", criar_regra_automatica: "Regra automática",
-  enviar_eventos_conversao: "Eventos de conversão" };
+  enviar_eventos_conversao: "Eventos de conversão",
+  criar_teste_ab: "Teste A/B", criar_catalogo: "Catálogo", criar_feed_produtos: "Feed de produtos", criar_regra_feed: "Regra de feed", criar_conjunto_produtos: "Conjunto de produtos",
+  criar_produtos: "Criar produtos", atualizar_produtos: "Editar produtos", criar_criativo_avancado: "Criativo avançado", criar_pixel: "Criar pixel",
+  moderar_comentario: "Moderar comentário", responder_comentario: "Responder comentário", dar_acesso_ativo: "Acesso na BM" };
 
 function desenharPermissoes() {
   const c = cliente(atual); if (!c || !$("#permissoes")) return;
   const rot = estado.rotulos_permissoes || {};
   const ajuda = { status: "Ligar e desligar campanhas, conjuntos e anúncios.", orcamento: "Mudar orçamento diário ou total, limite de CPA e ROAS mínimo.",
-    editar: "Renomear e editar segmentação, públicos, posicionamentos e datas de campanhas, conjuntos e públicos.", criar: "Criar campanhas, conjuntos, anúncios, criativos, vídeos e públicos (site, engajamento, semelhante, lista) e duplicar. Tudo nasce pausado." };
-  const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear e editar", criar: "Criar e duplicar" };
+    editar: "Renomear e editar segmentação, públicos, posicionamentos, datas, produtos do catálogo e ocultar comentários.", criar: "Criar campanhas, conjuntos, anúncios, criativos, vídeos, públicos, testes A/B, catálogo e feeds, pixel e conversões, e responder comentários. Tudo nasce pausado.",
+    bm: "Dar a pessoas da BM acesso limitado (analisar, anunciar) a contas e páginas. Nunca dá controle total nem remove ninguém. Desligado por padrão." };
+  const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear e editar", criar: "Criar e duplicar", bm: "Administrar a BM" };
   const t = teste[c.id] || {}, d = t.dados;
   const r = rascunhos[c.id] || { permissoes: c.permissoes || [], teto: c.teto || "", exigir_periodo: !!c.exigir_periodo };
   const escrita = r.permissoes.length > 0;

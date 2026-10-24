@@ -127,6 +127,17 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `listar_regras` | Leitura | Regras automáticas da conta. |
 | `criar_regra_automatica` | Criar e duplicar (+ ativar e pausar se pausa ou liga) | Regra que avisa ou pausa; nasce desligada. |
 | `enviar_eventos_conversao` | Criar e duplicar | API de Conversões: vendas e leads do servidor para o pixel, com hash local. |
+| `criar_teste_ab` | Criar e duplicar | Teste A/B entre campanhas, conjuntos ou anúncios existentes. |
+| `criar_catalogo`, `criar_feed_produtos`, `criar_regra_feed`, `criar_conjunto_produtos`, `criar_produtos` | Criar e duplicar | Escrita de catálogo, feed, regras, conjuntos e produtos. |
+| `atualizar_produtos` | Renomear e editar | Preço, estoque e textos de produtos; esconder via visibilidade. |
+| `criar_criativo_avancado` | Criar e duplicar | PAC, MMU, catálogo dinâmico e Advantage+. |
+| `criar_pixel` | Criar e duplicar | Cria pixel na conta. |
+| `listar_comentarios` | Leitura | Comentários de anúncio ou post. |
+| `moderar_comentario` | Renomear e editar | Oculta ou mostra comentário (nunca apaga). |
+| `responder_comentario` | Criar e duplicar | Resposta pública como a página. |
+| `listar_usuarios_bm`, `listar_ativos_bm` | Leitura | Usuários e ativos da BM. |
+| `dar_acesso_ativo` | Administrar a BM | Acesso limitado de um usuário da BM a conta ou página. |
+| `benchmark_interno` | Leitura | Compara itens com a mediana da própria conta. |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 

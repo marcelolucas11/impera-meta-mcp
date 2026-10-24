@@ -1,5 +1,16 @@
 # Novidades
 
+## 6.5.0
+
+- **Teste A/B:** `criar_teste_ab` cria o teste da Meta entre 2 a 5 campanhas, conjuntos ou anúncios que já existem (mesmo tipo e mesma conta), dividindo o público em partes iguais. Não cria gasto novo. O resultado aparece em `listar_testes_ab`.
+- **Catálogo, agora com escrita:** `criar_catalogo` (recusa um segundo catálogo sem confirmação, porque a Meta recomenda um só), `criar_feed_produtos` (a Meta busca seu arquivo por https), `criar_regra_feed`, `criar_conjunto_produtos`, `criar_produtos` e `atualizar_produtos` (até 25 por vez; preço, estoque, texto, imagem; esconder produto é `visibilidade=hidden`, nada é apagado).
+- **Criativos avançados:** `criar_criativo_avancado` faz PAC (mídia diferente por posicionamento, com uma mídia padrão), MMU (várias mídias e textos, a Meta escolhe), carrossel dinâmico de catálogo e criativo com melhorias Advantage+. Só cria o criativo; use o ID em `criar_anuncio`.
+- **Pixel:** `criar_pixel`. As regras de eventos por clique ou URL (Events Setup) não existem na API pública da Meta e continuam só na BM ou no código do site.
+- **Comentários:** `listar_comentarios` (de anúncio ou post, Facebook ou Instagram), `moderar_comentario` (oculta ou mostra de novo; nunca apaga) e `responder_comentario` (resposta pública como a página).
+- **BM:** `listar_usuarios_bm` e `listar_ativos_bm` (só leitura) e `dar_acesso_ativo`, que dá a alguém da BM acesso LIMITADO (analisar, anunciar, rascunhar; na página também criar conteúdo e moderar) a uma conta ou página que o cliente já usa. Exige uma permissão nova e separada, **"Administrar a BM"**, que vem desligada. Não existe controle total, administrador nem remoção de acesso.
+- **Benchmark:** os benchmarks de setor da Meta são proprietários e não existem na API pública, então não dá para trazê-los. No lugar entrou `benchmark_interno`: compara cada campanha, conjunto ou anúncio com a mediana da própria conta (CPM, CTR, CPC, CPA, ROAS) e marca quem está acima ou abaixo do normal.
+- Testado só contra Meta simulada. Pontos que dependem de confirmação em conta real: formato de PAC e Advantage+, criação de teste A/B e feed de catálogo. Comentários e BM precisam do usuário do sistema atribuído à página e do ID da BM na ficha.
+
 ## 6.4.0
 
 - **Leads de formulário instantâneo.** `listar_formularios` mostra os formulários da página; `baixar_leads` baixa os leads (com filtro de data) para um CSV na pasta do cliente, com permissão restrita. A resposta do Claude mostra só a contagem e uma amostra com e-mail e telefone mascarados. `criar_formulario_leads` cria o formulário (nome, e-mail, telefone etc., política de privacidade e botão final, por exemplo para o grupo do WhatsApp). Para isso o usuário do sistema precisa estar atribuído à página com controle total.
