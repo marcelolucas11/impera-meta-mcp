@@ -119,6 +119,9 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `diagnosticar_entrega`, `log_atividades`, `comparar_periodos` | Leitura | Reprovações e aprendizado; quem mudou o quê; dois períodos lado a lado. |
 | `previa_anuncio`, `listar_criativos`, `listar_instagram` | Leitura | Prévia por posicionamento; criativos da conta; perfis e posts do Instagram. |
 | `biblioteca_anuncios`, `diagnosticar_pixel`, `listar_conversoes_personalizadas` | Leitura | Anúncios de concorrentes; saúde do pixel; conversões personalizadas. |
+| `listar_catalogos`, `listar_conjuntos_produtos`, `listar_produtos`, `diagnosticar_catalogo` | Leitura | Catálogos, conjuntos de produtos, produtos e saúde dos feeds. |
+| `listar_testes_ab` | Leitura | Testes A/B da conta. |
+| `criar_conversao_personalizada` | Criar e duplicar | Conversão por trecho de URL, ligada a um pixel da conta. |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 

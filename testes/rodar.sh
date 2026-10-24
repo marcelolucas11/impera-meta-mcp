@@ -35,6 +35,7 @@ rodar "atualização: dados do usuário preservados, pacotes ruins recusados, in
 rodar "alterações com permissão: teto, pausado, conta padrão, histórico, sem repetição" "$PY" testes/test_escrita.py .
 rodar "ferramentas avançadas: campanha/conjunto completos, públicos, criativos, vídeo, edição" "$PY" testes/test_avancado.py .
 rodar "leituras: diagnóstico, log, prévia, criativos, Instagram, biblioteca, pixel, conversões, comparação" "$PY" testes/test_leituras.py .
+rodar "conversão personalizada, catálogos e testes A/B" "$PY" testes/test_catalogos.py .
 rodar "públicos de lista: lotes, valor, simulação, arquivo sem hash, falha no meio" "$PY" testes/test_publicos.py .
 rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

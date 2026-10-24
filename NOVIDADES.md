@@ -1,5 +1,13 @@
 # Novidades
 
+## 6.2.0
+
+- **Catálogos (só leitura):** `listar_catalogos`, `listar_conjuntos_produtos`, `listar_produtos` (com preço, estoque e se a Meta aprovou) e `diagnosticar_catalogo`, que mostra os feeds, a última carga (itens aceitos, inválidos, erros) e os problemas que a Meta aponta. Só vale para catálogos ligados à conta padrão do cliente.
+- **Testes A/B (só leitura):** `listar_testes_ab` mostra os testes da conta, período e a divisão entre as células.
+- **Nova: `criar_conversao_personalizada`.** Cria uma conversão por trecho de URL (ex.: página de obrigado) no pixel da conta, com evento e valor padrão opcionais. Exige a permissão "criar e duplicar". Nome repetido é recusado e nada é apagado.
+- **Impulsionar post do Instagram** continua feito por `criar_anuncio` com `post_instagram_id`: nasce pausado, para você conferir e ativar.
+- Ainda não existe: criar teste A/B, criar catálogo ou feed, anúncio dinâmico de catálogo. Testado só contra Meta simulada, como as versões anteriores.
+
 ## 6.1.0
 
 - **Mais nove leituras para o Claude investigar uma conta**, todas só de leitura (nada é alterado):

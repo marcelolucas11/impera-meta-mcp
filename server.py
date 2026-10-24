@@ -3421,6 +3421,178 @@ async def comparar_periodos(
 
 
 
+# ───────────────────────── 6.2.0: conversão personalizada, catálogos e testes A/B ─────────────────────────
+
+_EVENTOS_CONVERSAO = {"PURCHASE", "LEAD", "COMPLETE_REGISTRATION", "ADD_TO_CART", "ADD_PAYMENT_INFO", "INITIATED_CHECKOUT", "CONTENT_VIEW",
+                      "SEARCH", "ADD_TO_WISHLIST", "CONTACT", "SUBSCRIBE", "START_TRIAL", "SUBMIT_APPLICATION", "SCHEDULE", "OTHER"}
+_OPERADORES_URL = {"contem": "i_contains", "igual": "eq", "nao_contem": "i_not_contains", "comeca_com": "starts_with"}
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_conversao_personalizada(
+    nome: Annotated[str, Field(description="Nome da conversão (ex.: 'Obrigado - Compra').", min_length=1, max_length=100)],
+    url_regra: Annotated[str, Field(description="Trecho da URL que marca a conversão (ex.: 'obrigado').", min_length=1, max_length=200)],
+    evento: Annotated[str, Field(description="Tipo de evento: PURCHASE, LEAD, COMPLETE_REGISTRATION, ADD_TO_CART, INITIATED_CHECKOUT, CONTACT, SUBSCRIBE, OTHER etc.")] = "PURCHASE",
+    condicao: Annotated[Literal["contem", "igual", "nao_contem", "comeca_com"], Field(description="Como comparar a URL.")] = "contem",
+    pixel_id: Annotated[Optional[str], Field(description="Pixel da conta. Vazio: o primeiro pixel da conta padrão.")] = None,
+    valor_padrao: Annotated[Optional[float], Field(description="Valor de cada conversão, se o site não envia valor.", ge=0)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria uma conversão personalizada baseada em URL, ligada a um pixel da conta padrão do cliente. Exige a permissão
+    'criar e duplicar'. Não apaga nem altera as existentes; nome repetido é recusado."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        ev = evento.strip().upper()
+        if ev not in _EVENTOS_CONVERSAO:
+            raise MetaError(f"Evento inválido. Use um destes: {', '.join(sorted(_EVENTOS_CONVERSAO))}.")
+        params = dict(nome=nome, url_regra=url_regra, evento=ev, condicao=condicao, pixel_id=pixel_id, valor_padrao=valor_padrao)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+            if not pixels:
+                raise MetaError("A conta não tem pixel. Crie o pixel na BM antes.")
+            if pixel_id:
+                if str(pixel_id) not in {str(p.get("id")) for p in pixels}:
+                    raise MetaError(f"O pixel {pixel_id} não é da conta padrão do cliente. Use listar_pixels.")
+                pid = str(pixel_id)
+            else:
+                pid = str(pixels[0]["id"])
+            existentes = await _get_all(c, f"{conta['act']}/customconversions", {"fields": "id,name", "limit": 200})
+            if any(str(e.get("name", "")).strip().lower() == nome.strip().lower() for e in existentes):
+                raise MetaError(f"Já existe uma conversão chamada '{nome}'. Escolha outro nome. Nada foi criado.")
+            regra = {"and": [{"url": {_OPERADORES_URL[condicao]: url_regra}}]}
+            dados = {"name": nome, "event_source_id": pid, "rule": regra, "custom_event_type": ev}
+            if valor_padrao is not None:
+                dados["default_conversion_value"] = valor_padrao
+            r = await _post(c, f"{conta['act']}/customconversions", dados)
+        msg = f"OK conversão '{nome}' criada (ID {r.get('id')}), evento {ev}, URL {condicao} '{url_regra}', pixel {pid}."
+        _registrar("criar_conversao_personalizada", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+async def _catalogo_da_conta(c: httpx.AsyncClient, conta: dict, catalogo_id: str) -> dict:
+    cats = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name,product_count,vertical", "limit": 50})
+    achado = next((x for x in cats if str(x.get("id")) == str(catalogo_id)), None)
+    if not achado:
+        raise MetaError(f"O catálogo {catalogo_id} não está ligado à conta padrão do cliente. Use listar_catalogos para ver os liberados.")
+    return achado
+
+
+@mcp.tool(annotations=_RO)
+async def listar_catalogos(cliente: _CLIENTE = None) -> str:
+    """Catálogos de produtos ligados à conta padrão do cliente, com quantidade de produtos. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name,product_count,vertical", "limit": 50})
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(rows)} catálogo(s)\n" + _csv(
+            [{"id": r.get("id"), "nome": r.get("name"), "produtos": r.get("product_count"), "vertical": r.get("vertical")} for r in rows],
+            ["id", "nome", "produtos", "vertical"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_conjuntos_produtos(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None) -> str:
+    """Conjuntos de produtos de um catálogo da conta padrão (filtro e quantidade). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            cat = await _catalogo_da_conta(c, conta, catalogo_id)
+            rows = await _get_all(c, f"{catalogo_id}/product_sets", {"fields": "id,name,filter,product_count", "limit": 100})
+        return f"Cliente: {nome_cliente} | Catálogo: {cat.get('name')} | {len(rows)} conjunto(s) de produtos\n" + _csv(
+            [{"id": r.get("id"), "nome": r.get("name"), "produtos": r.get("product_count"), "filtro": json.dumps(r.get("filter"), ensure_ascii=False) if r.get("filter") else None} for r in rows],
+            ["id", "nome", "produtos", "filtro"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_produtos(
+    catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")],
+    busca: Annotated[Optional[str], Field(description="Trecho do nome do produto.", max_length=100)] = None,
+    limite: Annotated[int, Field(description="Máximo de produtos.", ge=1, le=200)] = 50,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Produtos de um catálogo da conta padrão: preço, disponibilidade e se a Meta aprovou. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            cat = await _catalogo_da_conta(c, conta, catalogo_id)
+            params = {"fields": "id,retailer_id,name,price,availability,review_status,url", "limit": limite}
+            if busca:
+                params["filter"] = json.dumps({"name": {"i_contains": busca}})
+            dados = await _get(c, f"{catalogo_id}/products", params)
+        rows = (dados.get("data") or [])[:limite]
+        return f"Cliente: {nome_cliente} | Catálogo: {cat.get('name')} | {len(rows)} produto(s)\n" + _csv(
+            [{"id": r.get("id"), "sku": r.get("retailer_id"), "nome": r.get("name"), "preco": r.get("price"), "estoque": r.get("availability"),
+              "revisao": r.get("review_status"), "url": r.get("url")} for r in rows],
+            ["id", "sku", "nome", "preco", "estoque", "revisao", "url"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def diagnosticar_catalogo(catalogo_id: Annotated[str, Field(description="ID do catálogo (de listar_catalogos).")], cliente: _CLIENTE = None) -> str:
+    """Saúde de um catálogo da conta padrão: feeds com a última atualização (itens aceitos, inválidos, erros) e problemas
+    apontados pela Meta. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            cat = await _catalogo_da_conta(c, conta, catalogo_id)
+            feeds = await _get_all(c, f"{catalogo_id}/product_feeds", {
+                "fields": "id,name,schedule,latest_upload{end_time,num_detected_items,num_persisted_items,num_invalid_items,error_count,warning_count}", "limit": 50})
+            try:
+                diag = (await _get(c, f"{catalogo_id}/diagnostics", {"fields": "id,type,title,severity,number_of_affected_items"})).get("data") or []
+                aviso = None
+            except MetaError as e:
+                diag, aviso = [], f"diagnóstico de itens indisponível ({e})"
+        lf = []
+        for f in feeds:
+            u = f.get("latest_upload") or {}
+            lf.append({"feed": f.get("name"), "id": f.get("id"), "ultima_carga": (u.get("end_time") or "")[:16], "detectados": u.get("num_detected_items"),
+                       "aceitos": u.get("num_persisted_items"), "invalidos": u.get("num_invalid_items"), "erros": u.get("error_count"), "avisos": u.get("warning_count")})
+        ld = [{"gravidade": d.get("severity"), "problema": d.get("title") or d.get("type"), "itens_afetados": d.get("number_of_affected_items")} for d in diag]
+        txt = [f"Cliente: {nome_cliente} | Catálogo: {cat.get('name')} ({catalogo_id}) | {cat.get('product_count')} produto(s)"]
+        if not feeds:
+            txt.append("ATENÇÃO: nenhum feed configurado (produtos só entram à mão ou por pixel).")
+        elif any((f.get("invalidos") or 0) > 0 or (f.get("erros") or 0) > 0 for f in lf):
+            txt.append("ATENÇÃO: há itens inválidos ou erros na última carga de algum feed.")
+        if aviso:
+            txt.append(f"AVISO: {aviso}")
+        txt.append("\nFeeds:\n" + _csv(lf, ["feed", "id", "ultima_carga", "detectados", "aceitos", "invalidos", "erros", "avisos"]))
+        if ld:
+            txt.append("Problemas:\n" + _csv(ld, ["gravidade", "problema", "itens_afetados"]))
+        return "\n".join(txt)
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_testes_ab(cliente: _CLIENTE = None) -> str:
+    """Testes A/B (estudos) da conta padrão do cliente: nome, tipo, período e células com divisão de público. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            rows = await _get_all(c, f"{conta['act']}/ad_studies", {
+                "fields": "id,name,type,start_time,end_time,cells{name,treatment_percentage}", "limit": 50})
+        linhas = [{"id": r.get("id"), "nome": r.get("name"), "tipo": r.get("type"), "inicio": (r.get("start_time") or "")[:10],
+                   "fim": (r.get("end_time") or "")[:10],
+                   "celulas": "; ".join(f"{x.get('name')} ({x.get('treatment_percentage')}%)" for x in (r.get("cells") or {}).get("data", []))} for r in rows]
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} teste(s)\n" + _csv(linhas, ["id", "nome", "tipo", "inicio", "fim", "celulas"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+
 def main() -> None:
     if "--check" in sys.argv:
         print(asyncio.run(listar_clientes()))
