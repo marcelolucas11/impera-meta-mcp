@@ -26,7 +26,7 @@ import sys
 import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, get_args
 
 import httpx
 from pydantic import Field
@@ -1185,7 +1185,7 @@ async def exportar_relatorio(
 PERMISSOES = {
     "status": "ativar e pausar",
     "orcamento": "orçamentos e lances",
-    "editar": "renomear",
+    "editar": "renomear e editar (segmentação, públicos, datas)",
     "criar": "criar e duplicar (sempre pausado)",
 }
 _ESTRATEGIAS = {
@@ -1281,9 +1281,11 @@ def _friendly_escrita(code: Any, msg: str, status: int) -> str:
     return f"A Meta recusou a alteração (código {code}): {msg}"
 
 
-async def _post(client: httpx.AsyncClient, path: str, data: dict) -> dict:
-    """POST na Graph API. Só repete quando a Meta recusou antes de processar (limite de chamadas
-    ou falha de conexão); em qualquer dúvida não repete, para nunca criar nada em dobro."""
+async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = "POST",
+                arquivos: Optional[dict] = None) -> dict:
+    """POST (ou DELETE, para tirar linhas de um público) na Graph API. `arquivos` envia um pedaço de
+    arquivo em multipart (upload de vídeo). Só repete quando a Meta recusou antes de processar (limite
+    de chamadas ou falha de conexão); em qualquer dúvida não repete, para nunca criar nada em dobro."""
     url = f"{GRAPH_HOST}/{_api_version()}/{path.lstrip('/')}"
     form = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) else str(v))
             for k, v in data.items() if v is not None}
@@ -1293,7 +1295,10 @@ async def _post(client: httpx.AsyncClient, path: str, data: dict) -> dict:
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
         try:
-            r = await client.post(url, data=form)
+            if arquivos:
+                r = await client.request(metodo, url, data=form, files=arquivos)
+            else:
+                r = await client.request(metodo, url, data=form)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             if not last:
                 await asyncio.sleep(_BACKOFF[attempt])
@@ -1595,6 +1600,156 @@ async def duplicar(
         return _tool_error(e)
 
 
+_CATEGORIAS_ESPECIAIS = Literal["EMPLOYMENT", "HOUSING", "FINANCIAL_PRODUCTS_SERVICES", "ISSUES_ELECTIONS_POLITICS",
+                                "ONLINE_GAMBLING_AND_GAMING"]
+_DATA_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
+# Posicionamentos manuais: nome amigável -> (plataforma, campo de posições, posição na Meta).
+_POSICOES = {
+    "facebook_feed": ("facebook", "facebook_positions", "feed"),
+    "facebook_stories": ("facebook", "facebook_positions", "story"),
+    "facebook_reels": ("facebook", "facebook_positions", "facebook_reels"),
+    "facebook_marketplace": ("facebook", "facebook_positions", "marketplace"),
+    "facebook_coluna_direita": ("facebook", "facebook_positions", "right_hand_column"),
+    "instagram_feed": ("instagram", "instagram_positions", "stream"),
+    "instagram_stories": ("instagram", "instagram_positions", "story"),
+    "instagram_reels": ("instagram", "instagram_positions", "reels"),
+    "instagram_explorar": ("instagram", "instagram_positions", "explore"),
+    "messenger_caixa_de_entrada": ("messenger", "messenger_positions", "messenger_home"),
+    "audience_network": ("audience_network", "audience_network_positions", "classic"),
+}
+_POSICAO = Literal["facebook_feed", "facebook_stories", "facebook_reels", "facebook_marketplace", "facebook_coluna_direita",
+                   "instagram_feed", "instagram_stories", "instagram_reels", "instagram_explorar",
+                   "messenger_caixa_de_entrada", "audience_network"]
+_DESTINO = Literal["site", "whatsapp", "messenger", "instagram_direct", "formulario", "perfil_instagram"]
+_META_OTIMIZACAO = Literal["OFFSITE_CONVERSIONS", "VALUE", "LANDING_PAGE_VIEWS", "LINK_CLICKS", "REACH", "IMPRESSIONS",
+                           "THRUPLAY", "CONVERSATIONS"]
+# Campos avançados que podem ir num conjunto sem passar pelos parâmetros próprios. Só os que limitam ou
+# refinam a entrega: nada que aumente gasto além do teto do cliente.
+_EXTRAS_CONJUNTO = {"frequency_control_specs", "attribution_spec", "adset_schedule", "pacing_type", "dsa_beneficiary",
+                    "dsa_payor", "is_dynamic_creative", "daily_spend_cap", "lifetime_spend_cap"}
+
+
+def _data_meta(valor: str, campo: str, fim: bool = False) -> str:
+    """Aceita AAAA-MM-DD ou AAAA-MM-DDTHH:MM e devolve ISO sem fuso (a Meta usa o fuso da conta)."""
+    v = (valor or "").strip()
+    if not _DATA_RE.match(v):
+        raise MetaError(f"{campo} precisa estar no formato AAAA-MM-DD (ou AAAA-MM-DDTHH:MM), por exemplo 2026-11-30.")
+    if "T" not in v:
+        v += "T23:59:00" if fim else "T00:00:00"
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        raise MetaError(f"{campo} não é uma data válida: {valor!r}.")
+    return v
+
+
+def _dias_de_veiculacao(inicio: Optional[str], fim: str) -> int:
+    d0 = datetime.fromisoformat(inicio).date() if inicio else date.today()
+    d1 = datetime.fromisoformat(fim).date()
+    if d1 < d0:
+        raise MetaError("A data final é anterior à data inicial (ou a hoje).")
+    return (d1 - d0).days + 1
+
+
+def _checar_total(total: float, inicio: Optional[str], fim: str, moeda: str) -> None:
+    """O teto do cliente é diário: um orçamento total vale pelo equivalente por dia."""
+    dias = _dias_de_veiculacao(inicio, fim)
+    try:
+        _checar_teto(total / dias, moeda)
+    except MetaError as e:
+        raise MetaError(f"Orçamento total de {moeda} {total:,.2f} em {dias} dia(s) equivale a {moeda} {total / dias:,.2f} "
+                        f"por dia. {e}")
+
+
+def _id_interesse(valor: Any) -> str:
+    v = str(valor).strip()
+    if not re.fullmatch(r"\d{5,20}", v):
+        raise MetaError(f"'{valor}' não é um ID de interesse da Meta. Use buscar_interesses para obter os IDs.")
+    return v
+
+
+def _geo(paises: list, regioes: list, cidades: list, raio_km: Optional[int]) -> dict:
+    geo: dict = {"location_types": ["home", "recent"]}
+    if cidades:
+        geo["cities"] = [dict({"key": str(k)}, **({"radius": raio_km, "distance_unit": "kilometer"} if raio_km else {})) for k in cidades]
+    if regioes:
+        geo["regions"] = [{"key": str(k)} for k in regioes]
+    if not cidades and not regioes:
+        geo["countries"] = [p.upper() for p in paises] or ["BR"]
+    return geo
+
+
+def _aplicar_posicoes(alvo: dict, posicoes: list) -> None:
+    plataformas: list = []
+    campos: dict = {}
+    for p in posicoes:
+        plat, campo, valor = _POSICOES[p]
+        if plat not in plataformas:
+            plataformas.append(plat)
+        if valor not in campos.setdefault(campo, []):
+            campos[campo].append(valor)
+    alvo["publisher_platforms"] = plataformas
+    alvo.update(campos)
+
+
+def _montar_alvo(*, paises: list, regioes: list, cidades: list, raio_km: Optional[int], idade_min: int, idade_max: int,
+                 genero: str, publico_advantage: bool, incluir: list, excluir: list, interesses: list, posicoes: list) -> dict:
+    if idade_min > idade_max:
+        raise MetaError("A idade mínima não pode ser maior que a máxima.")
+    alvo: dict = {"geo_locations": _geo(paises, regioes, cidades, raio_km), "age_min": idade_min, "age_max": idade_max,
+                  "targeting_automation": {"advantage_audience": 1 if publico_advantage else 0}}
+    if genero != "todos":
+        alvo["genders"] = [1] if genero == "homens" else [2]
+    if incluir:
+        alvo["custom_audiences"] = [{"id": str(i)} for i in incluir]
+    if excluir:
+        alvo["excluded_custom_audiences"] = [{"id": str(i)} for i in excluir]
+    if interesses:
+        alvo["flexible_spec"] = [{"interests": [{"id": _id_interesse(i)} for i in interesses]}]
+    if posicoes:
+        _aplicar_posicoes(alvo, posicoes)
+    return alvo
+
+
+async def _publicos_da_conta(c: httpx.AsyncClient, conta: dict, ids: list) -> list:
+    """Confere que cada público existe e é da conta padrão do cliente antes de usá-lo."""
+    achados = []
+    for i in dict.fromkeys(str(x).strip() for x in ids):
+        if not re.fullmatch(r"\d{5,25}", i):
+            raise MetaError(f"ID de público inválido: {i!r}. Use listar_publicos para ver os IDs.")
+        a = await _get(c, i, {"fields": "id,name,account_id,subtype"})
+        if str(a.get("account_id")) != conta["id"]:
+            raise MetaError(f"O público {i} ('{a.get('name')}') não é da conta padrão do cliente '{_cliente_id()}' "
+                            f"({conta['nome']}). Nada foi alterado.")
+        achados.append(a)
+    return achados
+
+
+async def _pagina_da_conta(c: httpx.AsyncClient, conta: dict, pagina_id: Optional[str]) -> str:
+    if not pagina_id or not re.fullmatch(r"\d{5,25}", str(pagina_id)):
+        raise MetaError("Informe pagina_id (veja listar_paginas): este destino precisa de uma página do Facebook.")
+    paginas = await _get_all(c, f"{conta['act']}/promote_pages", {"fields": "id,name", "limit": 100})
+    if str(pagina_id) not in {str(p.get("id")) for p in paginas}:
+        raise MetaError(f"A página {pagina_id} não está liberada para anunciar nesta conta. Páginas disponíveis: "
+                        + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in paginas) or "nenhuma") + ".")
+    return str(pagina_id)
+
+
+def _extras(texto: Optional[str], permitidos: set) -> dict:
+    if not texto:
+        return {}
+    try:
+        d = json.loads(texto)
+    except ValueError:
+        raise MetaError("campos_extras precisa ser um JSON válido (ex.: {\"frequency_control_specs\": [...]}).")
+    if not isinstance(d, dict):
+        raise MetaError("campos_extras precisa ser um objeto JSON.")
+    fora = sorted(set(d) - permitidos)
+    if fora:
+        raise MetaError(f"Campos não permitidos em campos_extras: {', '.join(fora)}. Permitidos: {', '.join(sorted(permitidos))}.")
+    return d
+
+
 @mcp.tool(annotations=_CRIA)
 async def criar_campanha(
     nome: Annotated[str, Field(description="Nome da campanha.", min_length=1, max_length=400)],
@@ -1603,44 +1758,131 @@ async def criar_campanha(
     orcamento_diario: Annotated[Optional[float], Field(description="Orçamento diário da campanha (CBO / Advantage+). Vazio: orçamento fica nos conjuntos.", gt=0)] = None,
     estrategia_lance: Annotated[Literal["menor_custo", "limite_custo", "limite_lance", "roas_minimo"],
                                 Field(description="Estratégia de lance quando o orçamento é da campanha.")] = "menor_custo",
+    orcamento_total: Annotated[Optional[float], Field(description="Orçamento total (vitalício) da campanha, em vez do diário. Exige data_fim. O teto do cliente vale pelo equivalente por dia.", gt=0)] = None,
+    limite_gasto: Annotated[Optional[float], Field(description="Limite de gasto da campanha (spend cap), na moeda da conta. Exige a permissão de orçamentos e lances.", gt=0)] = None,
+    data_inicio: Annotated[Optional[str], Field(description="Início da campanha (AAAA-MM-DD ou AAAA-MM-DDTHH:MM, no fuso da conta).")] = None,
+    data_fim: Annotated[Optional[str], Field(description="Fim da campanha (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
+    categorias_especiais: Annotated[list[_CATEGORIAS_ESPECIAIS], Field(
+        description="Categorias especiais de anúncio (ex.: ONLINE_GAMBLING_AND_GAMING para sorteios/jogos, que a Meta só aceita "
+                    "com autorização prévia). Vazio: nenhuma. Não dá para mudar depois de criada.")] = [],
+    paises_categoria_especial: Annotated[list[str], Field(
+        description="Países onde a categoria especial vale (ex.: ['BR']). Obrigatório com categorias_especiais; todo país "
+                    "segmentado nos conjuntos precisa estar aqui.")] = [],
     cliente: _CLIENTE = None,
 ) -> str:
-    """Cria uma campanha PAUSADA na conta padrão do cliente. Exige a permissão 'criar e duplicar'.
-    Depois crie os conjuntos com criar_conjunto e os anúncios com criar_anuncio."""
+    """Cria uma campanha PAUSADA na conta padrão do cliente: objetivo, orçamento diário ou total (CBO), estratégia de lance,
+    limite de gasto, datas e categoria especial de anúncio. Exige a permissão 'criar e duplicar'. Depois crie os
+    conjuntos com criar_conjunto e os anúncios com criar_anuncio."""
     try:
         nome_cliente = _usar_cliente(cliente)
         _exigir("criar")
-        params = {"nome": nome, "objetivo": objetivo, "orcamento_diario": orcamento_diario, "estrategia_lance": estrategia_lance}
+        if limite_gasto is not None:
+            _exigir("orcamento")
+        if orcamento_diario is not None and orcamento_total is not None:
+            raise MetaError("Escolha orcamento_diario ou orcamento_total, não os dois.")
+        if orcamento_total is not None and not data_fim:
+            raise MetaError("Orçamento total exige data_fim (a Meta distribui o valor até essa data).")
+        if categorias_especiais and not paises_categoria_especial:
+            raise MetaError("Com categorias_especiais, informe paises_categoria_especial (ex.: ['BR']).")
+        inicio = _data_meta(data_inicio, "data_inicio") if data_inicio else None
+        fim = _data_meta(data_fim, "data_fim", fim=True) if data_fim else None
+        if inicio and fim and inicio > fim:
+            raise MetaError("data_fim é anterior à data_inicio.")
+        params = {"nome": nome, "objetivo": objetivo, "orcamento_diario": orcamento_diario, "estrategia_lance": estrategia_lance,
+                  "orcamento_total": orcamento_total, "limite_gasto": limite_gasto, "data_inicio": data_inicio,
+                  "data_fim": data_fim, "categorias_especiais": categorias_especiais,
+                  "paises_categoria_especial": paises_categoria_especial}
         async with _client() as c:
             conta = await _conta_padrao(c)
-            _checar_teto(orcamento_diario, conta["moeda"])
-            dados: dict = {"name": nome, "objective": objetivo, "status": "PAUSED", "special_ad_categories": [],
-                           "buying_type": "AUCTION"}
+            moeda = conta["moeda"]
+            _checar_teto(orcamento_diario, moeda)
+            if orcamento_total is not None:
+                _checar_total(orcamento_total, inicio, fim, moeda)
+            dados: dict = {"name": nome, "objective": objetivo, "status": "PAUSED",
+                           "special_ad_categories": list(categorias_especiais), "buying_type": "AUCTION"}
+            if categorias_especiais:
+                dados["special_ad_category_country"] = [p.upper() for p in paises_categoria_especial]
             if orcamento_diario is not None:
-                dados["daily_budget"] = _centavos(orcamento_diario, conta["moeda"])
+                dados["daily_budget"] = _centavos(orcamento_diario, moeda)
+                dados["bid_strategy"] = _ESTRATEGIAS[estrategia_lance]
+            elif orcamento_total is not None:
+                dados["lifetime_budget"] = _centavos(orcamento_total, moeda)
                 dados["bid_strategy"] = _ESTRATEGIAS[estrategia_lance]
             else:
                 dados["is_adset_budget_sharing_enabled"] = False
+            if limite_gasto is not None:
+                dados["spend_cap"] = _centavos(limite_gasto, moeda)
+            if inicio:
+                dados["start_time"] = inicio
+            if fim:
+                dados["stop_time"] = fim
             try:
                 r = await _post(c, f"{conta['act']}/campaigns", dados)
             except MetaError as e:
                 _registrar("criar_campanha", conta["act"], params, False, str(e))
                 raise
         msg = _ok_pausado("Campanha", str(r.get("id")), nome)
+        if "ONLINE_GAMBLING_AND_GAMING" in categorias_especiais:
+            msg += (" Atenção: a Meta só aceita anúncios de jogos e sorteios online de contas autorizadas; sem a autorização "
+                    "prévia os anúncios são reprovados.")
         _registrar("criar_campanha", str(r.get("id")), params, True, msg)
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
     except Exception as e:
         return _tool_error(e)
 
 
+async def _perfil_conjunto(c: httpx.AsyncClient, conta: dict, objetivo: Optional[str], destino: str, meta: Optional[str],
+                           pixel_id: Optional[str], evento: str, pagina_id: Optional[str]) -> dict:
+    """Define meta de otimização, destino e objeto promovido do conjunto conforme o objetivo da campanha."""
+    campos: dict = {"billing_event": "IMPRESSIONS"}
+    if destino == "site":
+        if meta is None:
+            meta = {"OUTCOME_SALES": "OFFSITE_CONVERSIONS", "OUTCOME_LEADS": "OFFSITE_CONVERSIONS",
+                    "OUTCOME_TRAFFIC": "LANDING_PAGE_VIEWS", "OUTCOME_AWARENESS": "REACH"}.get(objetivo or "")
+            if meta is None:
+                raise MetaError(f"Para uma campanha {objetivo}, escolha o destino (whatsapp, messenger, instagram_direct, "
+                                "formulario, perfil_instagram) ou uma meta_otimizacao; ou duplique um conjunto existente.")
+        if meta in ("OFFSITE_CONVERSIONS", "VALUE"):
+            if not pixel_id:
+                pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+                if len(pixels) != 1:
+                    raise MetaError("Informe o pixel_id. Pixels da conta: " + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in pixels) or "nenhum"))
+                pixel_id = str(pixels[0]["id"])
+            campos.update(optimization_goal=meta, destination_type="WEBSITE",
+                          promoted_object={"pixel_id": str(pixel_id), "custom_event_type": evento})
+        elif meta in ("LANDING_PAGE_VIEWS", "LINK_CLICKS"):
+            campos.update(optimization_goal=meta, destination_type="WEBSITE")
+        elif meta in ("REACH", "IMPRESSIONS", "THRUPLAY"):
+            campos.update(optimization_goal=meta)
+        else:
+            raise MetaError(f"A meta {meta} só vale com destino de mensagens (whatsapp, messenger, instagram_direct).")
+    elif destino in ("whatsapp", "messenger", "instagram_direct"):
+        if meta not in (None, "CONVERSATIONS"):
+            raise MetaError("Destinos de mensagem otimizam para CONVERSATIONS.")
+        pagina = await _pagina_da_conta(c, conta, pagina_id)
+        campos.update(optimization_goal="CONVERSATIONS", promoted_object={"page_id": pagina},
+                      destination_type={"whatsapp": "WHATSAPP", "messenger": "MESSENGER", "instagram_direct": "INSTAGRAM_DIRECT"}[destino])
+    elif destino == "formulario":
+        if objetivo != "OUTCOME_LEADS":
+            raise MetaError("Formulário instantâneo (lead ad) só vale em campanha de leads (OUTCOME_LEADS).")
+        pagina = await _pagina_da_conta(c, conta, pagina_id)
+        campos.update(optimization_goal="LEAD_GENERATION", destination_type="ON_AD", promoted_object={"page_id": pagina})
+    elif destino == "perfil_instagram":
+        if objetivo != "OUTCOME_TRAFFIC":
+            raise MetaError("Visitas ao perfil do Instagram só valem em campanha de tráfego (OUTCOME_TRAFFIC).")
+        campos.update(optimization_goal="VISIT_INSTAGRAM_PROFILE", destination_type="INSTAGRAM_PROFILE")
+    return campos
+
+
 @mcp.tool(annotations=_CRIA)
 async def criar_conjunto(
     campanha_id: Annotated[str, Field(description="ID da campanha onde o conjunto será criado.")],
     nome: Annotated[str, Field(description="Nome do conjunto.", min_length=1, max_length=400)],
-    pixel_id: Annotated[Optional[str], Field(description="Pixel/dataset para otimizar (vendas e leads). Vazio: usa o único pixel da conta, se houver só um.")] = None,
+    pixel_id: Annotated[Optional[str], Field(description="Pixel/dataset para otimizar (vendas e leads no site). Vazio: usa o único pixel da conta, se houver só um.")] = None,
     evento: Annotated[Literal["PURCHASE", "LEAD", "COMPLETE_REGISTRATION", "INITIATED_CHECKOUT", "ADD_TO_CART", "CONTENT_VIEW"],
                       Field(description="Evento de conversão a otimizar.")] = "PURCHASE",
-    orcamento_diario: Annotated[Optional[float], Field(description="Orçamento diário do conjunto. Obrigatório se a campanha não tiver orçamento.", gt=0)] = None,
+    orcamento_diario: Annotated[Optional[float], Field(description="Orçamento diário do conjunto. Obrigatório (ou orcamento_total) se a campanha não tiver orçamento.", gt=0)] = None,
+    orcamento_total: Annotated[Optional[float], Field(description="Orçamento total (vitalício) do conjunto. Exige data_fim. O teto do cliente vale pelo equivalente por dia.", gt=0)] = None,
     estrategia_lance: Annotated[Optional[Literal["menor_custo", "limite_custo", "limite_lance", "roas_minimo"]],
                                 Field(description="Só quando o orçamento é do conjunto. Vazio: menor custo.")] = None,
     limite_cpa: Annotated[Optional[float], Field(description="Limite de custo/lance, se a estratégia pedir.", gt=0)] = None,
@@ -1653,48 +1895,67 @@ async def criar_conjunto(
     idade_max: Annotated[int, Field(ge=18, le=65)] = 65,
     genero: Annotated[Literal["todos", "homens", "mulheres"], Field()] = "todos",
     publico_advantage: Annotated[bool, Field(description="Público Advantage+ (a Meta pode expandir além da segmentação).")] = True,
+    publicos_incluir: Annotated[list[str], Field(description="IDs de públicos personalizados/semelhantes da conta para incluir (veja listar_publicos).")] = [],
+    publicos_excluir: Annotated[list[str], Field(description="IDs de públicos da conta para excluir (ex.: quem já comprou).")] = [],
+    interesses: Annotated[list[str], Field(description="IDs de interesses (obtenha com buscar_interesses; nunca invente IDs).")] = [],
+    posicionamentos: Annotated[list[_POSICAO], Field(description="Posicionamentos manuais. Vazio: Advantage+ (automático).")] = [],
+    destino: Annotated[_DESTINO, Field(description="Onde a pessoa converte: site (padrão), whatsapp, messenger, instagram_direct, formulario (lead ad) ou perfil_instagram.")] = "site",
+    meta_otimizacao: Annotated[Optional[_META_OTIMIZACAO], Field(description="Meta de otimização. Vazio: a padrão do objetivo e destino (conversões, visualizações da página, alcance, conversas ou leads).")] = None,
+    pagina_id: Annotated[Optional[str], Field(description="Página do Facebook (veja listar_paginas). Obrigatória em whatsapp, messenger, instagram_direct e formulario.")] = None,
+    data_inicio: Annotated[Optional[str], Field(description="Início (AAAA-MM-DD ou AAAA-MM-DDTHH:MM, no fuso da conta). Vazio: ao ativar.")] = None,
+    data_fim: Annotated[Optional[str], Field(description="Fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM). Obrigatório com orcamento_total.")] = None,
+    campos_extras: Annotated[Optional[str], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO))
+                                                   + " (limite de frequência, janela de atribuição, horários etc.).")] = None,
     cliente: _CLIENTE = None,
 ) -> str:
-    """Cria um conjunto de anúncios PAUSADO numa campanha da conta padrão do cliente, otimizando para
-    um evento do pixel (vendas/leads) ou visualização da página (tráfego). Exige a permissão 'criar e duplicar'."""
+    """Cria um conjunto de anúncios PAUSADO numa campanha da conta padrão do cliente: otimização (conversões no pixel,
+    visualização da página, cliques, alcance, conversas no WhatsApp/Messenger/Direct, leads por formulário ou visitas ao
+    perfil), segmentação (local, idade, gênero, públicos, exclusões, interesses, posicionamentos), orçamento diário ou
+    total, lance e datas. Exige a permissão 'criar e duplicar'."""
     try:
         nome_cliente = _usar_cliente(cliente)
         _exigir("criar")
+        if orcamento_diario is not None and orcamento_total is not None:
+            raise MetaError("Escolha orcamento_diario ou orcamento_total, não os dois.")
+        if orcamento_total is not None and not data_fim:
+            raise MetaError("Orçamento total exige data_fim.")
+        inicio = _data_meta(data_inicio, "data_inicio") if data_inicio else None
+        fim = _data_meta(data_fim, "data_fim", fim=True) if data_fim else None
+        if inicio and fim and inicio > fim:
+            raise MetaError("data_fim é anterior à data_inicio.")
+        extras = _extras(campos_extras, _EXTRAS_CONJUNTO)
         params = {k: v for k, v in dict(campanha_id=campanha_id, nome=nome, pixel_id=pixel_id, evento=evento,
-                  orcamento_diario=orcamento_diario, estrategia_lance=estrategia_lance, limite_cpa=limite_cpa,
-                  roas_minimo=roas_minimo, paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km,
-                  idade_min=idade_min, idade_max=idade_max, genero=genero, publico_advantage=publico_advantage).items()}
-        if idade_min > idade_max:
-            raise MetaError("A idade mínima não pode ser maior que a máxima.")
+                  orcamento_diario=orcamento_diario, orcamento_total=orcamento_total, estrategia_lance=estrategia_lance,
+                  limite_cpa=limite_cpa, roas_minimo=roas_minimo, paises=paises, regioes=regioes, cidades=cidades,
+                  raio_km=raio_km, idade_min=idade_min, idade_max=idade_max, genero=genero,
+                  publico_advantage=publico_advantage, publicos_incluir=publicos_incluir, publicos_excluir=publicos_excluir,
+                  interesses=interesses, posicionamentos=posicionamentos, destino=destino, meta_otimizacao=meta_otimizacao,
+                  pagina_id=pagina_id, data_inicio=data_inicio, data_fim=data_fim, campos_extras=campos_extras).items()}
+        alvo = _montar_alvo(paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km, idade_min=idade_min,
+                            idade_max=idade_max, genero=genero, publico_advantage=publico_advantage, incluir=publicos_incluir,
+                            excluir=publicos_excluir, interesses=interesses, posicoes=posicionamentos)
         async with _client() as c:
             camp, tipo, conta = await _objeto(c, campanha_id, "objective,daily_budget,lifetime_budget,bid_strategy")
             if tipo != "campaign":
                 raise MetaError(f"{campanha_id} não é uma campanha.")
             moeda = conta["moeda"]
-            objetivo = camp.get("objective")
-            dados: dict = {"name": nome, "campaign_id": str(campanha_id), "status": "PAUSED", "billing_event": "IMPRESSIONS"}
-            if objetivo in ("OUTCOME_SALES", "OUTCOME_LEADS"):
-                if not pixel_id:
-                    pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
-                    if len(pixels) != 1:
-                        raise MetaError("Informe o pixel_id. Pixels da conta: " + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in pixels) or "nenhum"))
-                    pixel_id = str(pixels[0]["id"])
-                dados.update(optimization_goal="OFFSITE_CONVERSIONS", destination_type="WEBSITE",
-                             promoted_object={"pixel_id": str(pixel_id), "custom_event_type": evento})
-            elif objetivo == "OUTCOME_TRAFFIC":
-                dados.update(optimization_goal="LANDING_PAGE_VIEWS", destination_type="WEBSITE")
-            else:
-                raise MetaError(f"Criar conjunto do zero está disponível para vendas, leads e tráfego; esta campanha é "
-                                f"{objetivo}. Use duplicar a partir de um conjunto existente.")
+            dados: dict = {"name": nome, "campaign_id": str(campanha_id), "status": "PAUSED"}
+            dados.update(await _perfil_conjunto(c, conta, camp.get("objective"), destino, meta_otimizacao, pixel_id, evento, pagina_id))
+            if publicos_incluir or publicos_excluir:
+                await _publicos_da_conta(c, conta, list(publicos_incluir) + list(publicos_excluir))
             cbo = bool(camp.get("daily_budget") or camp.get("lifetime_budget"))
             estrategia = camp.get("bid_strategy") if cbo else _ESTRATEGIAS[estrategia_lance or "menor_custo"]
-            if cbo and orcamento_diario is not None:
+            if cbo and (orcamento_diario is not None or orcamento_total is not None):
                 raise MetaError("Esta campanha tem orçamento próprio (CBO); o conjunto não leva orçamento. Ajuste o da campanha.")
             if not cbo:
-                if orcamento_diario is None:
-                    raise MetaError("A campanha não tem orçamento: informe orcamento_diario para o conjunto.")
-                _checar_teto(orcamento_diario, moeda)
-                dados["daily_budget"] = _centavos(orcamento_diario, moeda)
+                if orcamento_diario is None and orcamento_total is None:
+                    raise MetaError("A campanha não tem orçamento: informe orcamento_diario (ou orcamento_total) para o conjunto.")
+                if orcamento_diario is not None:
+                    _checar_teto(orcamento_diario, moeda)
+                    dados["daily_budget"] = _centavos(orcamento_diario, moeda)
+                else:
+                    _checar_total(orcamento_total, inicio, fim, moeda)
+                    dados["lifetime_budget"] = _centavos(orcamento_total, moeda)
                 dados["bid_strategy"] = estrategia
             if estrategia in ("COST_CAP", "LOWEST_COST_WITH_BID_CAP"):
                 if limite_cpa is None:
@@ -1704,18 +1965,12 @@ async def criar_conjunto(
                 if roas_minimo is None:
                     raise MetaError("A estratégia de lance pede roas_minimo.")
                 dados["bid_constraints"] = {"roas_average_floor": int(round(roas_minimo * 10000))}
-            geo: dict = {"location_types": ["home", "recent"]}
-            if cidades:
-                geo["cities"] = [dict({"key": str(k)}, **({"radius": raio_km, "distance_unit": "kilometer"} if raio_km else {})) for k in cidades]
-            if regioes:
-                geo["regions"] = [{"key": str(k)} for k in regioes]
-            if not cidades and not regioes:
-                geo["countries"] = [p.upper() for p in paises] or ["BR"]
-            alvo: dict = {"geo_locations": geo, "age_min": idade_min, "age_max": idade_max,
-                          "targeting_automation": {"advantage_audience": 1 if publico_advantage else 0}}
-            if genero != "todos":
-                alvo["genders"] = [1] if genero == "homens" else [2]
             dados["targeting"] = alvo
+            if inicio:
+                dados["start_time"] = inicio
+            if fim:
+                dados["end_time"] = fim
+            dados.update(extras)
             try:
                 r = await _post(c, f"{conta['act']}/adsets", dados)
             except MetaError as e:
@@ -1755,11 +2010,114 @@ async def _subir_imagem(c: httpx.AsyncClient, act: str, url: Optional[str], arqu
     raise MetaError("A Meta não devolveu o hash da imagem enviada.")
 
 
+_CARTAO_CAMPOS = {"imagem_hash", "imagem_url", "imagem_arquivo", "video_id", "link", "titulo", "descricao", "cta"}
+_CTAS_VALIDOS = set(get_args(_CTAS))
+_VIDEOS_OK = {".mp4", ".mov"}
+_VIDEO_MAX_BYTES = 4 * 1024 * 1024 * 1024
+_MIDIAS_CARTAO = ("imagem_hash", "imagem_url", "imagem_arquivo", "video_id")
+
+
+async def _info_video(c: httpx.AsyncClient, video_id: str) -> dict:
+    v = await _get(c, str(video_id), {"fields": "picture,status"})
+    estado = (v.get("status") or {}).get("video_status") or "ready"
+    if estado != "ready":
+        raise MetaError(f"O vídeo {video_id} ainda não está pronto (status: {estado}). Espere o processamento da Meta e tente de novo.")
+    return v
+
+
+async def _spec_criativo(c: httpx.AsyncClient, conta: dict, *, nome: str, pagina_id: Optional[str], instagram_id: Optional[str],
+                         link: Optional[str], texto: Optional[str], titulo: Optional[str], descricao: Optional[str],
+                         imagem_hash: Optional[str], imagem_url: Optional[str], imagem_arquivo: Optional[str],
+                         video_id: Optional[str], cta: str, parametros_url: Optional[str], cartoes: Optional[list] = None,
+                         post_id: Optional[str] = None, post_instagram_id: Optional[str] = None) -> dict:
+    """Monta (sem criar) o corpo de um criativo: imagem, vídeo, carrossel, post existente ou post do Instagram."""
+    criativo: dict = {"name": f"{nome} - criativo"}
+    midia_solta = any((imagem_hash, imagem_url, imagem_arquivo, video_id))
+    if post_id:
+        if not re.fullmatch(r"\d{5,25}_\d{5,25}", str(post_id)):
+            raise MetaError("post_id precisa estar no formato <id da página>_<id do post>.")
+        if any((link, texto, titulo, descricao, midia_solta, cartoes, post_instagram_id)):
+            raise MetaError("Com post_id o anúncio usa o post como ele está: não combine com texto, link, mídia ou cartões.")
+        await _pagina_da_conta(c, conta, str(post_id).split("_")[0])
+        criativo["object_story_id"] = str(post_id)
+        if instagram_id:
+            criativo["instagram_user_id"] = str(instagram_id)
+        return criativo
+    if post_instagram_id:
+        if not re.fullmatch(r"\d{5,25}", str(post_instagram_id)) or not instagram_id:
+            raise MetaError("Para impulsionar um post do Instagram informe post_instagram_id (de listar_posts_instagram) e instagram_id.")
+        if any((link, texto, titulo, descricao, midia_solta, cartoes)):
+            raise MetaError("Com post_instagram_id o anúncio usa o post como ele está: não combine com texto, link, mídia ou cartões.")
+        criativo["source_instagram_media_id"] = str(post_instagram_id)
+        criativo["instagram_user_id"] = str(instagram_id)
+        return criativo
+    if not (pagina_id and link and texto):
+        raise MetaError("Para montar o criativo informe pagina_id, link e texto (ou use criativo_id).")
+    if cta not in _CTAS_VALIDOS:
+        raise MetaError(f"cta inválido: {cta}. Opções: {', '.join(sorted(_CTAS_VALIDOS))}.")
+    historia: dict = {"page_id": str(pagina_id)}
+    if instagram_id:
+        historia["instagram_user_id"] = str(instagram_id)
+    botao = {"type": cta, "value": {"link": link}}
+    if cartoes:
+        if midia_solta:
+            raise MetaError("Num carrossel a mídia vai dentro de cada cartão: não informe imagem_* nem video_id soltos.")
+        if not 2 <= len(cartoes) <= 10:
+            raise MetaError("Um carrossel precisa de 2 a 10 cartões.")
+        filhos = []
+        for k, cart in enumerate(cartoes, 1):
+            if not isinstance(cart, dict):
+                raise MetaError(f"Cartão {k}: precisa ser um objeto com a mídia, título, descrição e link.")
+            fora = sorted(set(cart) - _CARTAO_CAMPOS)
+            if fora:
+                raise MetaError(f"Cartão {k}: campos desconhecidos {', '.join(fora)}. Use: {', '.join(sorted(_CARTAO_CAMPOS))}.")
+            if sum(bool(cart.get(x)) for x in _MIDIAS_CARTAO) != 1:
+                raise MetaError(f"Cartão {k}: informe exatamente uma mídia (imagem_hash, imagem_url, imagem_arquivo ou video_id).")
+            destino = cart.get("link") or link
+            cta_cartao = cart.get("cta") or cta
+            if cta_cartao not in _CTAS_VALIDOS:
+                raise MetaError(f"Cartão {k}: cta inválido ({cta_cartao}).")
+            item: dict = {"link": destino, "call_to_action": {"type": cta_cartao, "value": {"link": destino}}}
+            if cart.get("titulo"):
+                item["name"] = cart["titulo"]
+            if cart.get("descricao"):
+                item["description"] = cart["descricao"]
+            if cart.get("video_id"):
+                item["video_id"] = str(cart["video_id"])
+                miniatura = (await _info_video(c, cart["video_id"])).get("picture")
+                if miniatura:
+                    item["picture"] = miniatura
+            elif cart.get("imagem_hash"):
+                item["image_hash"] = str(cart["imagem_hash"])
+            else:
+                item["image_hash"] = await _subir_imagem(c, conta["act"], cart.get("imagem_url"), cart.get("imagem_arquivo"))
+            filhos.append(item)
+        historia["link_data"] = {"link": link, "message": texto, "child_attachments": filhos, "multi_share_end_card": False}
+    else:
+        if sum(bool(x) for x in (imagem_hash, imagem_url, imagem_arquivo, video_id)) != 1:
+            raise MetaError("Informe exatamente uma mídia: imagem_hash, imagem_url, imagem_arquivo ou video_id.")
+        if imagem_url or imagem_arquivo:
+            imagem_hash = await _subir_imagem(c, conta["act"], imagem_url, imagem_arquivo)
+        if video_id:
+            miniatura = (await _info_video(c, video_id)).get("picture")
+            historia["video_data"] = {k: v for k, v in {"video_id": str(video_id), "message": texto, "title": titulo,
+                                                         "link_description": descricao, "image_url": miniatura,
+                                                         "call_to_action": botao}.items() if v}
+        else:
+            historia["link_data"] = {k: v for k, v in {"link": link, "message": texto, "name": titulo,
+                                                        "description": descricao, "image_hash": imagem_hash,
+                                                        "call_to_action": botao}.items() if v}
+    criativo["object_story_spec"] = historia
+    if parametros_url:
+        criativo["url_tags"] = parametros_url
+    return criativo
+
+
 @mcp.tool(annotations=_CRIA)
 async def criar_anuncio(
     conjunto_id: Annotated[str, Field(description="ID do conjunto onde o anúncio será criado.")],
     nome: Annotated[str, Field(description="Nome do anúncio.", min_length=1, max_length=400)],
-    criativo_id: Annotated[Optional[str], Field(description="Usar um criativo que já existe. Se informado, os campos abaixo são ignorados.")] = None,
+    criativo_id: Annotated[Optional[str], Field(description="Usar um criativo que já existe (veja listar_criativos ou criar_criativo). Se informado, os campos abaixo são ignorados.")] = None,
     pagina_id: Annotated[Optional[str], Field(description="Página do Facebook que assina o anúncio (veja listar_paginas).")] = None,
     instagram_id: Annotated[Optional[str], Field(description="Conta do Instagram que assina o anúncio (opcional).")] = None,
     link: Annotated[Optional[str], Field(description="URL de destino.")] = None,
@@ -1769,47 +2127,34 @@ async def criar_anuncio(
     imagem_hash: Annotated[Optional[str], Field(description="Imagem que já está na conta (veja listar_midias).")] = None,
     imagem_url: Annotated[Optional[str], Field(description="Imagem pública (https) para enviar à conta.")] = None,
     imagem_arquivo: Annotated[Optional[str], Field(description="Caminho de uma imagem neste Mac para enviar à conta.")] = None,
-    video_id: Annotated[Optional[str], Field(description="Vídeo que já está na conta (veja listar_midias).")] = None,
+    video_id: Annotated[Optional[str], Field(description="Vídeo que já está na conta (veja listar_midias ou enviar_video).")] = None,
     cta: Annotated[_CTAS, Field(description="Botão de chamada para ação.")] = "LEARN_MORE",
     parametros_url: Annotated[Optional[str], Field(description="Parâmetros de URL (UTMs), ex.: utm_source=meta&utm_campaign={{campaign.name}}.")] = None,
+    cartoes: Annotated[Optional[list[dict]], Field(description="Carrossel: 2 a 10 cartões, cada um com uma mídia (imagem_hash, imagem_url, imagem_arquivo ou video_id) e, opcionais, titulo, descricao, link e cta.")] = None,
+    post_id: Annotated[Optional[str], Field(description="Anunciar um post que já existe na página, no formato <id da página>_<id do post>. O post vai como está.")] = None,
+    post_instagram_id: Annotated[Optional[str], Field(description="Anunciar um post orgânico do Instagram (id de listar_posts_instagram). Exige instagram_id.")] = None,
     cliente: _CLIENTE = None,
 ) -> str:
-    """Cria um anúncio PAUSADO num conjunto da conta padrão do cliente, com um criativo existente ou
-    montando um novo (imagem ou vídeo, texto, título, link e botão). Exige a permissão 'criar e duplicar'."""
+    """Cria um anúncio PAUSADO num conjunto da conta padrão do cliente, com um criativo existente ou montando um novo:
+    imagem ou vídeo único, carrossel, post da página ou post do Instagram. Exige a permissão 'criar e duplicar'."""
     try:
         nome_cliente = _usar_cliente(cliente)
         _exigir("criar")
         params = dict(conjunto_id=conjunto_id, nome=nome, criativo_id=criativo_id, pagina_id=pagina_id, instagram_id=instagram_id,
                       link=link, texto=texto, titulo=titulo, descricao=descricao, imagem_hash=imagem_hash, imagem_url=imagem_url,
-                      imagem_arquivo=imagem_arquivo, video_id=video_id, cta=cta, parametros_url=parametros_url)
+                      imagem_arquivo=imagem_arquivo, video_id=video_id, cta=cta, parametros_url=parametros_url,
+                      cartoes=len(cartoes) if cartoes else None, post_id=post_id, post_instagram_id=post_instagram_id)
         async with _client() as c:
             conj, tipo, conta = await _objeto(c, conjunto_id)
             if tipo != "adset":
                 raise MetaError(f"{conjunto_id} não é um conjunto de anúncios.")
             try:
                 if not criativo_id:
-                    if not (pagina_id and link and texto):
-                        raise MetaError("Para montar o criativo informe pagina_id, link e texto (ou use criativo_id).")
-                    if sum(bool(x) for x in (imagem_hash, imagem_url, imagem_arquivo, video_id)) != 1:
-                        raise MetaError("Informe exatamente uma mídia: imagem_hash, imagem_url, imagem_arquivo ou video_id.")
-                    if imagem_url or imagem_arquivo:
-                        imagem_hash = await _subir_imagem(c, conta["act"], imagem_url, imagem_arquivo)
-                    botao = {"type": cta, "value": {"link": link}}
-                    historia: dict = {"page_id": str(pagina_id)}
-                    if instagram_id:
-                        historia["instagram_user_id"] = str(instagram_id)
-                    if video_id:
-                        miniatura = (await _get(c, str(video_id), {"fields": "picture"})).get("picture")
-                        historia["video_data"] = {k: v for k, v in {"video_id": str(video_id), "message": texto, "title": titulo,
-                                                                     "link_description": descricao, "image_url": miniatura,
-                                                                     "call_to_action": botao}.items() if v}
-                    else:
-                        historia["link_data"] = {k: v for k, v in {"link": link, "message": texto, "name": titulo,
-                                                                    "description": descricao, "image_hash": imagem_hash,
-                                                                    "call_to_action": botao}.items() if v}
-                    criativo = {"name": f"{nome} - criativo", "object_story_spec": historia}
-                    if parametros_url:
-                        criativo["url_tags"] = parametros_url
+                    criativo = await _spec_criativo(c, conta, nome=nome, pagina_id=pagina_id, instagram_id=instagram_id, link=link,
+                                                    texto=texto, titulo=titulo, descricao=descricao, imagem_hash=imagem_hash,
+                                                    imagem_url=imagem_url, imagem_arquivo=imagem_arquivo, video_id=video_id, cta=cta,
+                                                    parametros_url=parametros_url, cartoes=cartoes, post_id=post_id,
+                                                    post_instagram_id=post_instagram_id)
                     criativo_id = str((await _post(c, f"{conta['act']}/adcreatives", criativo)).get("id"))
                 r = await _post(c, f"{conta['act']}/ads", {"name": nome, "adset_id": str(conjunto_id),
                                                            "creative": {"creative_id": str(criativo_id)}, "status": "PAUSED"})
@@ -1819,6 +2164,120 @@ async def criar_anuncio(
         msg = _ok_pausado("Anúncio", str(r.get("id")), nome) + f" Criativo: {criativo_id}."
         _registrar("criar_anuncio", str(r.get("id")), params, True, msg)
         return f"Cliente: {nome_cliente} | Conjunto: {conj.get('name')} ({conjunto_id})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_criativo(
+    nome: Annotated[str, Field(description="Nome do criativo na biblioteca da conta.", min_length=1, max_length=300)],
+    pagina_id: Annotated[Optional[str], Field(description="Página do Facebook que assina (veja listar_paginas). Obrigatória, exceto com post_instagram_id.")] = None,
+    instagram_id: Annotated[Optional[str], Field(description="Conta do Instagram que assina (opcional; obrigatória com post_instagram_id).")] = None,
+    link: Annotated[Optional[str], Field(description="URL de destino.")] = None,
+    texto: Annotated[Optional[str], Field(description="Texto principal.")] = None,
+    titulo: Annotated[Optional[str], Field(description="Título.")] = None,
+    descricao: Annotated[Optional[str], Field(description="Descrição.")] = None,
+    imagem_hash: Annotated[Optional[str], Field(description="Imagem que já está na conta (veja listar_midias).")] = None,
+    imagem_url: Annotated[Optional[str], Field(description="Imagem pública (https) para enviar à conta.")] = None,
+    imagem_arquivo: Annotated[Optional[str], Field(description="Caminho de uma imagem neste Mac para enviar à conta.")] = None,
+    video_id: Annotated[Optional[str], Field(description="Vídeo pronto na conta (veja listar_midias ou enviar_video).")] = None,
+    cta: Annotated[_CTAS, Field(description="Botão de chamada para ação.")] = "LEARN_MORE",
+    parametros_url: Annotated[Optional[str], Field(description="Parâmetros de URL (UTMs).")] = None,
+    cartoes: Annotated[Optional[list[dict]], Field(description="Carrossel: 2 a 10 cartões, cada um com uma mídia e, opcionais, titulo, descricao, link e cta.")] = None,
+    post_id: Annotated[Optional[str], Field(description="Usar um post existente da página (<id da página>_<id do post>).")] = None,
+    post_instagram_id: Annotated[Optional[str], Field(description="Usar um post orgânico do Instagram (id de listar_posts_instagram).")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria só o criativo (sem anúncio) na conta padrão do cliente, para reaproveitar em vários anúncios: imagem ou vídeo
+    único, carrossel, post da página ou post do Instagram. Exige a permissão 'criar e duplicar'. Use o ID devolvido em
+    criar_anuncio (criativo_id)."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = dict(nome=nome, pagina_id=pagina_id, instagram_id=instagram_id, link=link, texto=texto, titulo=titulo,
+                      descricao=descricao, imagem_hash=imagem_hash, imagem_url=imagem_url, imagem_arquivo=imagem_arquivo,
+                      video_id=video_id, cta=cta, parametros_url=parametros_url, cartoes=len(cartoes) if cartoes else None,
+                      post_id=post_id, post_instagram_id=post_instagram_id)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            try:
+                criativo = await _spec_criativo(c, conta, nome=nome, pagina_id=pagina_id, instagram_id=instagram_id, link=link,
+                                                texto=texto, titulo=titulo, descricao=descricao, imagem_hash=imagem_hash,
+                                                imagem_url=imagem_url, imagem_arquivo=imagem_arquivo, video_id=video_id, cta=cta,
+                                                parametros_url=parametros_url, cartoes=cartoes, post_id=post_id,
+                                                post_instagram_id=post_instagram_id)
+                criativo["name"] = nome
+                r = await _post(c, f"{conta['act']}/adcreatives", criativo)
+            except MetaError as e:
+                _registrar("criar_criativo", conta["act"], params, False, str(e))
+                raise
+        msg = f"OK criativo '{nome}' criado (ID {r.get('id')}). Para anunciar, use criar_anuncio com criativo_id={r.get('id')}."
+        _registrar("criar_criativo", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def enviar_video(
+    titulo: Annotated[str, Field(description="Título do vídeo na biblioteca da conta.", min_length=1, max_length=200)],
+    url: Annotated[Optional[str], Field(description="Endereço https público do arquivo de vídeo (a Meta baixa sozinha).")] = None,
+    arquivo: Annotated[Optional[str], Field(description="Caminho completo de um vídeo .mp4 ou .mov neste Mac (até 4 GB; enviado em pedaços).")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Envia um vídeo para a biblioteca da conta padrão do cliente, a partir de um link https ou de um arquivo neste Mac.
+    Exige a permissão 'criar e duplicar'. A Meta processa o vídeo depois do envio: confira com listar_midias (tipo
+    videos) até ficar pronto antes de usá-lo em criar_anuncio."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if bool(url) == bool(arquivo):
+            raise MetaError("Informe url (https) ou arquivo, só um dos dois.")
+        params = {"titulo": titulo, "url": url, "arquivo": Path(arquivo).name if arquivo else None}
+        if url and not re.match(r"^https://", url):
+            raise MetaError("url precisa começar com https://.")
+        p = None
+        if arquivo:
+            p = Path(arquivo).expanduser()
+            if p.suffix.lower() not in _VIDEOS_OK or not p.is_file():
+                raise MetaError("arquivo precisa ser um vídeo .mp4 ou .mov existente neste Mac (caminho completo).")
+            if p.stat().st_size > _VIDEO_MAX_BYTES:
+                raise MetaError("O vídeo passa de 4 GB.")
+            if p.stat().st_size == 0:
+                raise MetaError("O arquivo de vídeo está vazio.")
+            params["tamanho_mb"] = round(p.stat().st_size / 1048576, 1)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            try:
+                if url:
+                    r = await _post(c, f"{conta['act']}/advideos", {"file_url": url, "title": titulo})
+                    video_id = str(r.get("id"))
+                else:
+                    tamanho = p.stat().st_size
+                    ini = await _post(c, f"{conta['act']}/advideos", {"upload_phase": "start", "file_size": tamanho})
+                    sessao, video_id = str(ini.get("upload_session_id")), str(ini.get("video_id"))
+                    inicio, fim = int(ini.get("start_offset") or 0), int(ini.get("end_offset") or 0)
+                    voltas = 0
+                    with p.open("rb") as f:
+                        while inicio != fim:
+                            voltas += 1
+                            if voltas > tamanho // 1024 + 10:
+                                raise MetaError("A Meta não avançou o envio do vídeo. Nada foi publicado.")
+                            f.seek(inicio)
+                            pedaco = f.read(fim - inicio)
+                            r = await _post(c, f"{conta['act']}/advideos", {"upload_phase": "transfer", "start_offset": inicio,
+                                                                           "upload_session_id": sessao},
+                                            arquivos={"video_file_chunk": (p.name, pedaco, "application/octet-stream")})
+                            inicio, fim = int(r.get("start_offset") or 0), int(r.get("end_offset") or 0)
+                    await _post(c, f"{conta['act']}/advideos", {"upload_phase": "finish", "upload_session_id": sessao, "title": titulo})
+            except MetaError as e:
+                msg = f"O envio do vídeo falhou e nada foi publicado. Detalhe: {e}"
+                _registrar("enviar_video", conta["act"], params, False, msg)
+                raise MetaError(msg, code=e.code)
+        msg = (f"OK vídeo '{titulo}' enviado (ID {video_id}). A Meta ainda vai processar: confira com listar_midias "
+               "(tipo videos) até o status ficar pronto antes de usar em criar_anuncio.")
+        _registrar("enviar_video", video_id, params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
     except Exception as e:
         return _tool_error(e)
 
@@ -1874,10 +2333,11 @@ async def listar_midias(
                            "criada": (r.get("created_time") or "")[:10]} for r in rows.get("data", [])]
                 cols = ["hash", "nome", "tamanho", "criada"]
             else:
-                rows = await _get(c, f"{conta['act']}/advideos", {"fields": "id,title,length,created_time", "limit": 60})
+                rows = await _get(c, f"{conta['act']}/advideos", {"fields": "id,title,length,created_time,status", "limit": 60})
                 linhas = [{"video_id": r.get("id"), "titulo": r.get("title"), "segundos": round(_f(r.get("length"))),
-                           "criado": (r.get("created_time") or "")[:10]} for r in rows.get("data", [])]
-                cols = ["video_id", "titulo", "segundos", "criado"]
+                           "criado": (r.get("created_time") or "")[:10],
+                           "status": (r.get("status") or {}).get("video_status")} for r in rows.get("data", [])]
+                cols = ["video_id", "titulo", "segundos", "criado", "status"]
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} {tipo}\n" + _csv(linhas, cols)
     except Exception as e:
         return _tool_error(e)
@@ -2078,6 +2538,559 @@ async def listar_publicos(cliente: _CLIENTE = None) -> str:
     except Exception as e:
         return _tool_error(e)
 
+
+
+# ───────────────────────── públicos: site, engajamento, semelhantes, edição ─────────────────────────
+
+_NOME_EVENTO = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,49}$")
+_EVENTOS_ENGAJAMENTO = {
+    "instagram": {"ig_business_profile_all": "todos que interagiram com o perfil", "ig_business_profile_engaged": "engajaram com post ou anúncio",
+                  "ig_user_messaged_business": "enviaram mensagem no Direct", "INSTAGRAM_PROFILE_FOLLOW": "seguem o perfil hoje"},
+    "pagina": {"page_engaged": "interagiram com a página", "page_visited": "visitaram a página", "page_liked": "curtem a página hoje",
+               "page_messaged": "enviaram mensagem à página", "page_cta_clicked": "clicaram no botão da página",
+               "page_or_post_save": "salvaram a página ou um post"},
+    "formulario": {"lead_generation_opened": "abriram o formulário", "lead_generation_submitted": "enviaram o formulário",
+                   "lead_generation_dropoff": "abriram e não enviaram"},
+}
+_FONTE_ENGAJAMENTO = {"instagram": "ig_business", "pagina": "page", "formulario": "lead"}
+_SEM_RETENCAO = {"INSTAGRAM_PROFILE_FOLLOW", "page_liked"}  # eventos de "hoje": retenção 0
+
+
+async def _nomes_livres(c: httpx.AsyncClient, conta: dict, nomes: list) -> None:
+    existentes = await _get_all(c, f"{conta['act']}/customaudiences", {"fields": "id,name", "limit": 200})
+    usados = {str(a.get("name", "")).strip().lower(): a for a in existentes}
+    for n in nomes:
+        igual = usados.get(n.strip().lower())
+        if igual:
+            raise MetaError(f"Já existe um público chamado '{igual.get('name')}' ({igual.get('id')}) nesta conta. "
+                            "Nada foi criado. Escolha outro nome.")
+
+
+def _evento_valido(valor: str, campo: str = "evento") -> str:
+    if not _NOME_EVENTO.match(valor or ""):
+        raise MetaError(f"{campo} inválido: {valor!r}. Use o nome do evento do pixel (ex.: Purchase, Lead, ViewContent).")
+    return valor
+
+
+def _regra_site(pixel_id: str, tipo: str, url_contem: Optional[str], evento: Optional[str], percentil: int, dias: int,
+                excluir_evento: Optional[str], excluir_url: Optional[str]) -> dict:
+    fonte = [{"type": "pixel", "id": str(pixel_id)}]
+    seg = dias * 86400
+    if tipo == "todos_visitantes":
+        filtros = [{"field": "url", "operator": "i_contains", "value": ""}]
+        template = "ALL_VISITORS"
+    elif tipo == "urls":
+        if not url_contem:
+            raise MetaError("tipo 'urls' exige url_contem (trecho do endereço, ex.: /checkout).")
+        filtros = [{"field": "url", "operator": "i_contains", "value": url_contem}]
+        template = "VISITORS_BY_URL"
+    elif tipo == "evento":
+        if not evento:
+            raise MetaError("tipo 'evento' exige evento (ex.: AddToCart, InitiateCheckout, Lead, Purchase).")
+        filtros = [{"field": "event", "operator": "eq", "value": _evento_valido(evento)}]
+        if url_contem:
+            filtros.append({"field": "url", "operator": "i_contains", "value": url_contem})
+        template = "VISITORS_BY_URL"
+    else:  # tempo_no_site
+        filtros = [{"field": "url", "operator": "i_contains", "value": ""}]
+        template = "TOP_TIME_SPENDERS"
+    regra: dict = {"event_sources": fonte, "retention_seconds": seg, "template": template,
+                   "filter": {"operator": "and", "filters": filtros}}
+    if tipo == "tempo_no_site":
+        regra["aggregation"] = {"type": "time_spent", "method": "percentile", "operator": "in_range",
+                                "value": {"from": 100 - percentil, "to": 100}}
+    rule: dict = {"inclusions": {"operator": "or", "rules": [regra]}}
+    filtros_ex = []
+    if excluir_evento:
+        filtros_ex.append({"field": "event", "operator": "eq", "value": _evento_valido(excluir_evento, "excluir_evento")})
+    if excluir_url:
+        filtros_ex.append({"field": "url", "operator": "i_contains", "value": excluir_url})
+    if filtros_ex:
+        rule["exclusions"] = {"operator": "or", "rules": [
+            {"event_sources": fonte, "retention_seconds": seg, "template": "VISITORS_BY_URL",
+             "filter": {"operator": "or", "filters": filtros_ex}}]}
+    return rule
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_publico_site(
+    nome: Annotated[str, Field(description="Nome do público.", min_length=1, max_length=200)],
+    tipo: Annotated[Literal["todos_visitantes", "urls", "evento", "tempo_no_site"], Field(
+        description="todos_visitantes; urls (visitou páginas com certo trecho no endereço); evento (disparou um evento do pixel, "
+                    "ex.: AddToCart); tempo_no_site (os que mais ficaram no site).")] = "todos_visitantes",
+    pixel_id: Annotated[Optional[str], Field(description="Pixel (veja listar_pixels). Vazio: usa o único pixel da conta.")] = None,
+    url_contem: Annotated[Optional[str], Field(description="Trecho do endereço (tipo urls, ou para refinar o tipo evento).")] = None,
+    evento: Annotated[Optional[str], Field(description="Evento do pixel (tipo evento): ViewContent, AddToCart, InitiateCheckout, Purchase, Lead, CompleteRegistration ou um evento personalizado.")] = None,
+    percentil_tempo: Annotated[Literal[5, 10, 25], Field(description="Tipo tempo_no_site: os X% que mais ficaram.")] = 25,
+    retencao_dias: Annotated[int, Field(description="Quantos dias a pessoa fica no público depois do evento (1 a 180).", ge=1, le=180)] = 30,
+    excluir_evento: Annotated[Optional[str], Field(description="Tira do público quem disparou este evento no mesmo período (ex.: Purchase, para remarketing de quem não comprou).")] = None,
+    excluir_url_contem: Annotated[Optional[str], Field(description="Tira do público quem visitou páginas com este trecho (ex.: /obrigado).")] = None,
+    descricao: Annotated[Optional[str], Field(max_length=500)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um público personalizado de visitantes do site (pixel) na conta padrão do cliente: todos os visitantes, quem
+    visitou certas páginas, quem disparou um evento ou os que mais ficaram no site, com exclusões opcionais. Exige a
+    permissão 'criar e duplicar'. Ele se preenche sozinho a partir dos eventos já registrados pelo pixel."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        params = dict(nome=nome, tipo=tipo, pixel_id=pixel_id, url_contem=url_contem, evento=evento,
+                      percentil_tempo=percentil_tempo if tipo == "tempo_no_site" else None, retencao_dias=retencao_dias,
+                      excluir_evento=excluir_evento, excluir_url_contem=excluir_url_contem, descricao=descricao)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            pixels = await _get_all(c, f"{conta['act']}/adspixels", {"fields": "id,name", "limit": 50})
+            if not pixel_id:
+                if len(pixels) != 1:
+                    raise MetaError("Informe o pixel_id. Pixels da conta: " + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in pixels) or "nenhum"))
+                pixel_id = str(pixels[0]["id"])
+            elif str(pixel_id) not in {str(p.get("id")) for p in pixels}:
+                raise MetaError(f"O pixel {pixel_id} não é da conta padrão do cliente. Pixels da conta: "
+                                + ("; ".join(f"{p.get('name')} ({p.get('id')})" for p in pixels) or "nenhum") + ".")
+            rule = _regra_site(str(pixel_id), tipo, url_contem, evento, percentil_tempo, retencao_dias, excluir_evento, excluir_url_contem)
+            await _nomes_livres(c, conta, [nome])
+            try:
+                r = await _post(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "WEBSITE", "description": descricao,
+                                                                         "rule": rule, "prefill": True})
+            except MetaError as e:
+                _registrar("criar_publico_site", conta["act"], params, False, str(e))
+                raise
+        msg = (f"OK público de site '{nome}' ({r.get('id')}) criado ({tipo}, {retencao_dias} dias). Ele se preenche com os eventos "
+               "do pixel e leva alguns minutos para mostrar o tamanho: confira com listar_publicos.")
+        _registrar("criar_publico_site", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_publico_engajamento(
+    nome: Annotated[str, Field(description="Nome do público.", min_length=1, max_length=200)],
+    origem: Annotated[Literal["instagram", "pagina", "formulario"], Field(description="De onde vem o engajamento.")],
+    origem_id: Annotated[str, Field(description="ID do perfil do Instagram (instagram_id de listar_paginas), da página do Facebook ou do formulário instantâneo.")],
+    evento: Annotated[str, Field(description="Evento. Instagram: ig_business_profile_all, ig_business_profile_engaged, ig_user_messaged_business, "
+                                             "INSTAGRAM_PROFILE_FOLLOW. Página: page_engaged, page_visited, page_liked, page_messaged, "
+                                             "page_cta_clicked, page_or_post_save. Formulário: lead_generation_opened, lead_generation_submitted, "
+                                             "lead_generation_dropoff.")],
+    retencao_dias: Annotated[int, Field(description="Dias de retenção (1 a 365). Ignorado nos eventos de 'hoje' (seguem/curtem).", ge=1, le=365)] = 30,
+    pagina_id: Annotated[Optional[str], Field(description="Página dona do formulário (origem formulario).")] = None,
+    descricao: Annotated[Optional[str], Field(max_length=500)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria um público personalizado de engajamento (Instagram, página do Facebook ou formulário instantâneo) na conta
+    padrão do cliente. Exige a permissão 'criar e duplicar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if evento not in _EVENTOS_ENGAJAMENTO[origem]:
+            raise MetaError(f"Evento '{evento}' não vale para {origem}. Opções: "
+                            + "; ".join(f"{k} ({v})" for k, v in _EVENTOS_ENGAJAMENTO[origem].items()) + ".")
+        if not re.fullmatch(r"\d{5,25}", str(origem_id)):
+            raise MetaError("origem_id precisa ser um ID numérico.")
+        params = dict(nome=nome, origem=origem, origem_id=origem_id, evento=evento, retencao_dias=retencao_dias,
+                      pagina_id=pagina_id, descricao=descricao)
+        fonte = {"type": _FONTE_ENGAJAMENTO[origem], "id": str(origem_id)}
+        if origem == "formulario" and pagina_id:
+            fonte["owner_id"] = str(pagina_id)
+        rule = {"inclusions": {"operator": "or", "rules": [{
+            "event_sources": [fonte], "retention_seconds": 0 if evento in _SEM_RETENCAO else retencao_dias * 86400,
+            "filter": {"operator": "or", "filters": [{"field": "event", "operator": "eq", "value": evento}]}}]}}
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            await _nomes_livres(c, conta, [nome])
+            try:
+                r = await _post(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "ENGAGEMENT", "description": descricao,
+                                                                         "rule": rule, "prefill": True})
+            except MetaError as e:
+                _registrar("criar_publico_engajamento", conta["act"], params, False, str(e))
+                raise
+        msg = (f"OK público de engajamento '{nome}' ({r.get('id')}) criado ({origem}: {_EVENTOS_ENGAJAMENTO[origem][evento]}). "
+               "Confira o tamanho com listar_publicos em alguns minutos.")
+        _registrar("criar_publico_engajamento", str(r.get("id")), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_publico_semelhante(
+    origem_id: Annotated[str, Field(description="ID do público de origem (lista de clientes, site ou engajamento) da conta. Semelhante de semelhante não existe.")],
+    percentuais: Annotated[list[float], Field(
+        description="Percentuais de semelhança, de 1 a 20 (1 = os 1% mais parecidos). Cada um vira um público. Ex.: [1, 3, 5].",
+        min_length=1, max_length=10)] = [1.0],
+    paises: Annotated[list[str], Field(description="Países onde procurar pessoas parecidas (ex.: ['BR']).", min_length=1)] = ["BR"],
+    nome: Annotated[Optional[str], Field(description="Nome base. Vazio: 'Semelhante 1% (BR) - <origem>'. Com vários percentuais o % entra no nome.", max_length=180)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria públicos semelhantes (lookalike) a partir de um público da conta padrão do cliente, um por percentual pedido.
+    Exige a permissão 'criar e duplicar'. A origem precisa ter ao menos 100 pessoas do país escolhido; cada semelhante
+    leva de alguns minutos a algumas horas para ficar pronto."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        percs = sorted({round(float(p), 2) for p in percentuais})
+        if any(p < 1 or p > 20 for p in percs):
+            raise MetaError("Os percentuais precisam estar entre 1 e 20.")
+        codigos = [re.sub(r"[^A-Za-z]", "", p).upper() for p in paises]
+        if any(len(p) != 2 for p in codigos):
+            raise MetaError("paises precisa de códigos de 2 letras (ex.: BR).")
+        params = dict(origem_id=origem_id, percentuais=percs, paises=codigos, nome=nome)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            origem = (await _publicos_da_conta(c, conta, [origem_id]))[0]
+            if str(origem.get("subtype")).upper() == "LOOKALIKE":
+                raise MetaError("A origem já é um público semelhante. Use um público de lista, de site ou de engajamento.")
+            pais_txt = "/".join(codigos)
+            nomes = [(nome + (f" {int(p) if p == int(p) else p}%" if len(percs) > 1 else "")) if nome
+                     else f"Semelhante {int(p) if p == int(p) else p}% ({pais_txt}) - {origem.get('name')}" for p in percs]
+            await _nomes_livres(c, conta, nomes)
+            criados, falha = [], None
+            for p, n in zip(percs, nomes):
+                spec = {"ratio": round(p / 100, 4)}
+                if len(codigos) == 1:
+                    spec["country"] = codigos[0]
+                else:
+                    spec["location_spec"] = {"geo_locations": {"countries": codigos}}
+                try:
+                    r = await _post(c, f"{conta['act']}/customaudiences", {"name": n, "subtype": "LOOKALIKE",
+                                                                             "origin_audience_id": str(origem_id), "lookalike_spec": spec})
+                    criados.append((n, str(r.get("id"))))
+                except MetaError as e:
+                    falha = e
+                    break
+        if falha:
+            msg = ((f"Criados antes da falha: {', '.join(f'{n} ({i})' for n, i in criados)}. " if criados else "Nenhum foi criado. ")
+                   + f"Não repeti nada. Detalhe: {falha}")
+            _registrar("criar_publico_semelhante", str(origem_id), params, False, msg)
+            raise MetaError(msg, code=falha.code)
+        msg = ("OK " + "; ".join(f"'{n}' ({i})" for n, i in criados)
+               + f" criado(s) a partir de '{origem.get('name')}'. Eles ficam prontos em minutos a horas: confira com listar_publicos.")
+        _registrar("criar_publico_semelhante", str(origem_id), params, True, msg)
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']} ({conta['id']})\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def alterar_publico(
+    id: Annotated[str, Field(description="ID do público da conta.")],
+    nome: Annotated[Optional[str], Field(description="Nome novo.", min_length=1, max_length=200)] = None,
+    descricao: Annotated[Optional[str], Field(description="Descrição nova.", max_length=500)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Muda o nome ou a descrição de um público da conta padrão do cliente. Exige a permissão 'editar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        if nome is None and descricao is None:
+            raise MetaError("Informe nome ou descricao para alterar.")
+        params = {"nome": nome, "descricao": descricao}
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            antigo = (await _publicos_da_conta(c, conta, [id]))[0]
+            if nome is not None and nome.strip().lower() != str(antigo.get("name", "")).strip().lower():
+                await _nomes_livres(c, conta, [nome])
+            try:
+                await _post(c, str(id), {"name": nome, "description": descricao})
+            except MetaError as e:
+                _registrar("alterar_publico", str(id), params, False, str(e))
+                raise
+        msg = f"público {id}: " + "; ".join(x for x in (f"nome '{antigo.get('name')}' -> '{nome}'" if nome is not None else "",
+                                                          "descrição atualizada" if descricao is not None else "") if x)
+        _registrar("alterar_publico", str(id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def atualizar_publico_lista(
+    publico_id: Annotated[str, Field(description="ID de um público de lista de clientes da conta (veja listar_publicos).")],
+    arquivo_csv: Annotated[str, Field(description="Caminho completo do CSV neste Mac, no mesmo formato de criar_publico_lista (colunas já com hash SHA-256).")],
+    operacao: Annotated[Literal["adicionar", "remover"], Field(description="adicionar linhas ao público ou remover as do arquivo.")] = "adicionar",
+    simular: Annotated[bool, Field(description="True: só confere o arquivo, sem enviar nada.")] = False,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Adiciona ou remove pessoas de um público de lista de clientes que já existe na conta padrão do cliente, enviando um
+    CSV com hash em lotes de 10.000. Exige a permissão 'editar'. A Meta pode recusar a remoção se o público ficar pequeno
+    demais para campanhas ativas."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        lista = await asyncio.to_thread(_ler_lista, arquivo_csv)
+        if lista["com_valor"] and operacao == "remover":
+            lista["schema"] = lista["schema"][:-1]
+            lista["linhas"] = [l[:-1] for l in lista["linhas"]]
+        linhas, schema = lista["linhas"], lista["schema"]
+        lotes = (len(linhas) + _LOTE_PUBLICO - 1) // _LOTE_PUBLICO
+        resumo = _resumo_lista(lista)
+        params = {"publico_id": publico_id, "arquivo": lista["arquivo"], "linhas": len(linhas), "lotes": lotes, "operacao": operacao}
+        if simular:
+            return f"SIMULAÇÃO, nada foi enviado à Meta. Cliente: {nome_cliente}\n{resumo}\nSeriam {lotes} lote(s) para {operacao}."
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            aud = (await _publicos_da_conta(c, conta, [publico_id]))[0]
+            if str(aud.get("subtype")).upper() != "CUSTOM":
+                raise MetaError(f"O público '{aud.get('name')}' não é de lista de clientes (é {aud.get('subtype')}); só esses aceitam linhas por arquivo.")
+            sessao = int.from_bytes(os.urandom(6), "big")
+            aceitas = invalidas = 0
+            for k in range(lotes):
+                parte = linhas[k * _LOTE_PUBLICO:(k + 1) * _LOTE_PUBLICO]
+                try:
+                    resp = await _post(c, f"{publico_id}/users", {
+                        "payload": {"schema": schema, "data": parte},
+                        "session": {"session_id": sessao, "batch_seq": k + 1, "last_batch_flag": k == lotes - 1,
+                                    "estimated_num_total": len(linhas)}}, metodo="POST" if operacao == "adicionar" else "DELETE")
+                except MetaError as e:
+                    msg = (f"O envio parou no lote {k + 1} de {lotes}; a Meta aceitou {aceitas:,} linhas antes. Não repeti nada: "
+                           f"confira com listar_publicos e me diga se quer completar. Detalhe: {e}")
+                    _registrar("atualizar_publico_lista", str(publico_id), params, False, msg)
+                    raise MetaError(msg, code=e.code)
+                aceitas += int(resp.get("num_received") or len(parte))
+                invalidas += int(resp.get("num_invalid_entries") or 0)
+        verbo = "adicionadas" if operacao == "adicionar" else "removidas"
+        msg = f"OK público '{aud.get('name')}' ({publico_id}): {aceitas:,} linhas {verbo} em {lotes} lote(s); {invalidas:,} inválidas segundo a Meta."
+        _registrar("atualizar_publico_lista", str(publico_id), params, True, msg)
+        return f"Cliente: {nome_cliente}\n{resumo}\n{msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── pesquisa de público ─────────────────────────
+
+def _sem_acento(s: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", str(s or "")) if not unicodedata.combining(ch)).lower()
+
+
+@mcp.tool(annotations=_RO)
+async def buscar_interesses(
+    termo: Annotated[str, Field(description="Assunto a procurar (ex.: 'sorteio', 'carros', 'moto').", min_length=2)],
+    modo: Annotated[Literal["buscar", "sugerir"], Field(description="buscar: interesses com esse nome; sugerir: interesses parecidos com o termo.")] = "buscar",
+    idioma: Annotated[str, Field(description="Idioma dos nomes (ex.: pt_BR, es_LA).")] = "pt_BR",
+    limite: Annotated[int, Field(ge=1, le=50)] = 25,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Procura interesses da Meta (com ID e tamanho aproximado do público) para usar em criar_conjunto e atualizar_conjunto.
+    Nunca invente IDs de interesse: use sempre os que esta ferramenta devolver."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        params = {"limit": limite, "locale": idioma}
+        if modo == "sugerir":
+            params.update(type="adinterestsuggestion", interest_list=json.dumps([termo], ensure_ascii=False))
+        else:
+            params.update(type="adinterest", q=termo)
+        async with _client() as c:
+            r = await _get(c, "search", params)
+        linhas = [{"id": x.get("id"), "nome": x.get("name"), "tamanho_min": x.get("audience_size_lower_bound"),
+                   "tamanho_max": x.get("audience_size_upper_bound"), "caminho": " > ".join(x.get("path") or [])}
+                  for x in r.get("data", [])]
+        return f"Cliente: {nome_cliente} | {len(linhas)} interesse(s) para '{termo}'\n" + _csv(
+            linhas, ["id", "nome", "tamanho_min", "tamanho_max", "caminho"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def estimar_publico(
+    paises: Annotated[list[str], Field(description="Códigos de país. Ignorado se houver regiões ou cidades.")] = ["BR"],
+    regioes: Annotated[list[str], Field(description="Chaves de estados/regiões (buscar_localizacao).")] = [],
+    cidades: Annotated[list[str], Field(description="Chaves de cidades (buscar_localizacao).")] = [],
+    raio_km: Annotated[Optional[int], Field(ge=10, le=80)] = None,
+    idade_min: Annotated[int, Field(ge=18, le=65)] = 18,
+    idade_max: Annotated[int, Field(ge=18, le=65)] = 65,
+    genero: Annotated[Literal["todos", "homens", "mulheres"], Field()] = "todos",
+    publicos_incluir: Annotated[list[str], Field(description="IDs de públicos da conta para incluir.")] = [],
+    publicos_excluir: Annotated[list[str], Field(description="IDs de públicos da conta para excluir.")] = [],
+    interesses: Annotated[list[str], Field(description="IDs de interesses (buscar_interesses).")] = [],
+    posicionamentos: Annotated[list[_POSICAO], Field(description="Posicionamentos manuais. Vazio: automático.")] = [],
+    meta: Annotated[Literal["REACH", "LINK_CLICKS", "IMPRESSIONS", "LANDING_PAGE_VIEWS"], Field(description="Meta de otimização da estimativa.")] = "REACH",
+    cliente: _CLIENTE = None,
+) -> str:
+    """Estima o tamanho do público de uma segmentação na conta padrão do cliente (pessoas por mês e por dia) antes de
+    criar o conjunto. Só leitura."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        alvo = _montar_alvo(paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km, idade_min=idade_min,
+                            idade_max=idade_max, genero=genero, publico_advantage=False, incluir=publicos_incluir,
+                            excluir=publicos_excluir, interesses=interesses, posicoes=posicionamentos)
+        alvo.pop("targeting_automation", None)
+        async with _client() as c:
+            conta = await _conta_padrao(c)
+            r = await _get(c, f"{conta['act']}/delivery_estimate", {"optimization_goal": meta,
+                                                                   "targeting_spec": json.dumps(alvo, ensure_ascii=False)})
+        e = (r.get("data") or [{}])[0]
+        if not e:
+            raise MetaError("A Meta não devolveu estimativa para essa segmentação.")
+        pronto = e.get("estimate_ready")
+        mau = (f"{int(e.get('estimate_mau_lower_bound') or 0):,} a {int(e.get('estimate_mau_upper_bound') or 0):,} pessoas por mês"
+               if e.get("estimate_mau_lower_bound") is not None else "sem estimativa mensal")
+        dau = f"{int(e['estimate_dau']):,} pessoas por dia" if e.get("estimate_dau") is not None else "sem estimativa diária"
+        return (f"Cliente: {nome_cliente} | Conta: {conta['nome']}\nPúblico estimado: {mau}; {dau}"
+                + ("" if pronto in (None, True) else " (estimativa ainda sendo calculada)") + ".")
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── editar conjunto e campanha que já existem ─────────────────────────
+
+@mcp.tool(annotations=_MUDA)
+async def atualizar_conjunto(
+    id: Annotated[str, Field(description="ID do conjunto de anúncios.")],
+    publicos_incluir: Annotated[Optional[list[str]], Field(description="IDs de públicos da conta a incluir. Substitui a lista atual; lista vazia limpa. Omitido: não mexe.")] = None,
+    publicos_excluir: Annotated[Optional[list[str]], Field(description="IDs de públicos da conta a excluir. Substitui a lista atual; lista vazia limpa.")] = None,
+    interesses: Annotated[Optional[list[str]], Field(description="IDs de interesses (buscar_interesses). Substitui os atuais; lista vazia limpa.")] = None,
+    paises: Annotated[Optional[list[str]], Field(description="Substitui a localização por estes países.")] = None,
+    regioes: Annotated[Optional[list[str]], Field(description="Substitui a localização por estas regiões (buscar_localizacao).")] = None,
+    cidades: Annotated[Optional[list[str]], Field(description="Substitui a localização por estas cidades (buscar_localizacao).")] = None,
+    raio_km: Annotated[Optional[int], Field(ge=10, le=80)] = None,
+    idade_min: Annotated[Optional[int], Field(ge=18, le=65)] = None,
+    idade_max: Annotated[Optional[int], Field(ge=18, le=65)] = None,
+    genero: Annotated[Optional[Literal["todos", "homens", "mulheres"]], Field()] = None,
+    posicionamentos: Annotated[Optional[list[_POSICAO]], Field(description="Posicionamentos manuais. Lista vazia volta para o automático (Advantage+).")] = None,
+    publico_advantage: Annotated[Optional[bool], Field(description="Liga ou desliga o público Advantage+.")] = None,
+    data_inicio: Annotated[Optional[str], Field(description="Novo início (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
+    data_fim: Annotated[Optional[str], Field(description="Novo fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
+    campos_extras: Annotated[Optional[str], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO)))] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Muda a configuração de um conjunto de anúncios da conta padrão do cliente: públicos incluídos e excluídos,
+    interesses, localização, idade, gênero, posicionamentos, datas e campos avançados. Só altera o que for informado e
+    mantém o resto da segmentação. Exige a permissão 'editar'. Orçamento e lance continuam em alterar_orcamento."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        informado = [publicos_incluir, publicos_excluir, interesses, paises, regioes, cidades, idade_min, idade_max, genero,
+                     posicionamentos, publico_advantage, data_inicio, data_fim, campos_extras]
+        if all(v is None for v in informado):
+            raise MetaError("Informe ao menos uma coisa para alterar.")
+        inicio = _data_meta(data_inicio, "data_inicio") if data_inicio else None
+        fim = _data_meta(data_fim, "data_fim", fim=True) if data_fim else None
+        extras = _extras(campos_extras, _EXTRAS_CONJUNTO)
+        params = {k: v for k, v in dict(publicos_incluir=publicos_incluir, publicos_excluir=publicos_excluir, interesses=interesses,
+                  paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km, idade_min=idade_min, idade_max=idade_max,
+                  genero=genero, posicionamentos=posicionamentos, publico_advantage=publico_advantage, data_inicio=data_inicio,
+                  data_fim=data_fim, campos_extras=campos_extras).items() if v is not None}
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, id, "targeting,start_time,end_time")
+            if tipo != "adset":
+                raise MetaError(f"Este ID é {_tipo_frase(tipo)}; atualizar_conjunto só vale para conjuntos.")
+            alvo = json.loads(json.dumps(obj.get("targeting") or {}))
+            alvo.pop("age_range", None)
+            mudou = []
+            if any(v is not None for v in (paises, regioes, cidades)):
+                alvo["geo_locations"] = _geo(paises or [], regioes or [], cidades or [], raio_km)
+                mudou.append("localização")
+            if idade_min is not None or idade_max is not None:
+                novo_min = idade_min if idade_min is not None else int(alvo.get("age_min") or 18)
+                novo_max = idade_max if idade_max is not None else int(alvo.get("age_max") or 65)
+                if novo_min > novo_max:
+                    raise MetaError("A idade mínima não pode ser maior que a máxima.")
+                alvo["age_min"], alvo["age_max"] = novo_min, novo_max
+                mudou.append(f"idade {novo_min}-{novo_max}")
+            if genero is not None:
+                if genero == "todos":
+                    alvo.pop("genders", None)
+                else:
+                    alvo["genders"] = [1] if genero == "homens" else [2]
+                mudou.append(f"gênero {genero}")
+            if publicos_incluir is not None:
+                await _publicos_da_conta(c, conta, publicos_incluir)
+                alvo["custom_audiences"] = [{"id": str(i)} for i in publicos_incluir]
+                if not publicos_incluir:
+                    alvo.pop("custom_audiences")
+                mudou.append(f"públicos incluídos: {len(publicos_incluir)}")
+            if publicos_excluir is not None:
+                await _publicos_da_conta(c, conta, publicos_excluir)
+                alvo["excluded_custom_audiences"] = [{"id": str(i)} for i in publicos_excluir]
+                if not publicos_excluir:
+                    alvo.pop("excluded_custom_audiences")
+                mudou.append(f"públicos excluídos: {len(publicos_excluir)}")
+            if interesses is not None:
+                if interesses:
+                    alvo["flexible_spec"] = [{"interests": [{"id": _id_interesse(i)} for i in interesses]}]
+                else:
+                    alvo.pop("flexible_spec", None)
+                mudou.append(f"interesses: {len(interesses)}")
+            if posicionamentos is not None:
+                for k in [k for k in alvo if k == "publisher_platforms" or k.endswith("_positions")]:
+                    alvo.pop(k)
+                if posicionamentos:
+                    _aplicar_posicoes(alvo, posicionamentos)
+                mudou.append("posicionamentos manuais" if posicionamentos else "posicionamentos automáticos")
+            if publico_advantage is not None:
+                alvo["targeting_automation"] = dict(alvo.get("targeting_automation") or {}, advantage_audience=1 if publico_advantage else 0)
+                mudou.append(f"Advantage+ {'ligado' if publico_advantage else 'desligado'}")
+            dados: dict = {}
+            if any(x is not None for x in (publicos_incluir, publicos_excluir, interesses, paises, regioes, cidades, idade_min,
+                                           idade_max, genero, posicionamentos, publico_advantage)):
+                dados["targeting"] = alvo
+            if inicio:
+                dados["start_time"] = inicio
+                mudou.append(f"início {data_inicio}")
+            if fim:
+                dados["end_time"] = fim
+                mudou.append(f"fim {data_fim}")
+            if extras:
+                dados.update(extras)
+                mudou.append("campos avançados: " + ", ".join(sorted(extras)))
+            try:
+                await _post(c, str(id), dados)
+            except MetaError as e:
+                _registrar("atualizar_conjunto", str(id), params, False, str(e))
+                raise
+        msg = f"conjunto {obj.get('name')} ({id}): " + "; ".join(mudou)
+        _registrar("atualizar_conjunto", str(id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def atualizar_campanha(
+    id: Annotated[str, Field(description="ID da campanha.")],
+    data_inicio: Annotated[Optional[str], Field(description="Novo início (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
+    data_fim: Annotated[Optional[str], Field(description="Novo fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
+    limite_gasto: Annotated[Optional[float], Field(description="Novo limite de gasto da campanha (spend cap), na moeda da conta. Exige a permissão de orçamentos e lances.", gt=0)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Muda as datas e o limite de gasto de uma campanha da conta padrão do cliente. Datas exigem a permissão 'editar';
+    limite de gasto exige 'orçamentos e lances'. Orçamento diário/total continua em alterar_orcamento."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        if data_inicio is None and data_fim is None and limite_gasto is None:
+            raise MetaError("Informe data_inicio, data_fim ou limite_gasto.")
+        if data_inicio is not None or data_fim is not None:
+            _exigir("editar")
+        if limite_gasto is not None:
+            _exigir("orcamento")
+        inicio = _data_meta(data_inicio, "data_inicio") if data_inicio else None
+        fim = _data_meta(data_fim, "data_fim", fim=True) if data_fim else None
+        params = {"data_inicio": data_inicio, "data_fim": data_fim, "limite_gasto": limite_gasto}
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, id, "start_time,stop_time,spend_cap")
+            if tipo != "campaign":
+                raise MetaError(f"Este ID é {_tipo_frase(tipo)}; atualizar_campanha só vale para campanhas.")
+            dados: dict = {}
+            mudou = []
+            if inicio:
+                dados["start_time"] = inicio
+                mudou.append(f"início {data_inicio}")
+            if fim:
+                dados["stop_time"] = fim
+                mudou.append(f"fim {data_fim}")
+            if limite_gasto is not None:
+                dados["spend_cap"] = _centavos(limite_gasto, conta["moeda"])
+                mudou.append(f"limite de gasto {conta['moeda']} {limite_gasto:,.2f}")
+            try:
+                await _post(c, str(id), dados)
+            except MetaError as e:
+                _registrar("atualizar_campanha", str(id), params, False, str(e))
+                raise
+        msg = f"campanha {obj.get('name')} ({id}): " + "; ".join(mudou)
+        _registrar("atualizar_campanha", str(id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
 
 
 def main() -> None:

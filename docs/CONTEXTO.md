@@ -50,6 +50,7 @@ A ponte do Claude com a Meta é o servidor, não o app: funciona com o app abert
 | 5.0.3 | Métricas de vídeo em `consultar_insights` (`com_video`) e tipo do criativo em `estrutura_conta`. |
 | 5.0.4 | Tipo do ID (campanha/conjunto/anúncio) descoberto sem depender do `metadata` da Meta, que vinha vazio ou com nomes antigos e travava `duplicar` e `alterar_orcamento`. |
 | 5.0.5 | Chave por cliente "Exigir período" (`EXIGIR_PERIODO=1`); `estrutura_conta` com `desde`/`ate` lista só o que veiculou no período (ativo ou pausado, com `gasto_periodo`); `duplicar` com `orcamento_diario` da cópia (teto conferido contra o valor novo) e teto aplicado aos conjuntos de campanha sem orçamento de campanha. |
+| 6.0.0 | Auditoria contra o MCP nativo: campanha/conjunto completos (categorias especiais, orçamento total, públicos, interesses, posicionamentos, destinos WhatsApp/formulário), públicos de site/engajamento/semelhante, criativos (carrossel, post, Instagram), `enviar_video`, `atualizar_conjunto/campanha`, `buscar_interesses`, `estimar_publico`. Só testado em API simulada. Faltam (6.1.0): diagnóstico de entrega, prévias, biblioteca de anúncios, pixel/conversões, A/B, catálogos. |
 | 5.1.0 | `criar_publico_lista` (CSV com hash SHA-256 do Mac vira público personalizado, em lotes de 10.000, com valor opcional e simulação) e `listar_publicos`. |
 
 ## 4. Ferramentas que o Claude tem
@@ -74,7 +75,8 @@ Alteração (só com a permissão ligada para o cliente):
 | `alterar_status` | `status` |
 | `alterar_orcamento` (orçamento, limite de CPA, ROAS mínimo) | `orcamento` |
 | `renomear` | `editar` |
-| `duplicar`, `criar_campanha`, `criar_conjunto`, `criar_anuncio`, `criar_publico_lista` | `criar` |
+| `duplicar`, `criar_campanha`, `criar_conjunto`, `criar_anuncio`, `criar_publico_lista`, `criar_publico_site`, `criar_publico_engajamento`, `criar_publico_semelhante`, `criar_criativo`, `enviar_video` | `criar` |
+| `alterar_publico`, `atualizar_publico_lista`, `atualizar_conjunto`, `atualizar_campanha` | `editar` (limite de gasto: `orcamento`) |
 
 Análises: com `EXIGIR_PERIODO=1` no cliente, `consultar_insights` e `exportar_relatorio` recusam chamada sem `desde` e `ate`, e a mensagem manda o Claude perguntar o período (ou usar o que o usuário já disse). `estrutura_conta` sem período continua liberada, porque serve para achar IDs antes de alterar.
 

@@ -1,5 +1,16 @@
 # Novidades
 
+## 6.0.0
+
+- **O app agora faz o que um gestor de tráfego faz na BM.** Passou de 19 para 30 ferramentas, cobrindo o que o MCP nativo da Meta faz na criação e edição de campanhas. Tudo continua nascendo PAUSADO, só na conta padrão do cliente, respeitando o teto diário e com registro no histórico.
+- **Campanhas completas:** categorias especiais de anúncio (com país), orçamento total (vitalício) com data de fim, limite de gasto, datas de início e fim. Para jogos e apostas, o Claude avisa que a Meta exige autorização da conta.
+- **Conjuntos completos:** públicos incluídos e excluídos, interesses, posicionamentos manuais (Feed, Reels, Stories etc.), destinos de site, WhatsApp, Messenger, Direct, formulário instantâneo e perfil do Instagram, meta de otimização escolhida e orçamento total.
+- **Públicos novos:** de visitantes do site (todos, por URL, por evento, com exclusão de quem comprou, por tempo no site), de engajamento (Instagram, página, vídeo) e **semelhantes** de 1% a 20%, vários de uma vez e em um ou mais países. Também dá para renomear públicos e adicionar ou remover pessoas de uma lista.
+- **Pesquisa:** `buscar_interesses` (com tamanho de público) e `estimar_publico` (alcance estimado antes de criar).
+- **Criativos:** carrossel (2 a 10 cartões), vídeo, post existente da página e post orgânico do Instagram, com `criar_criativo` separado do anúncio. `enviar_video` sobe vídeo por link ou direto do seu Mac, em pedaços, até 4 GB.
+- **Edição:** `atualizar_conjunto` (segmentação, públicos, posicionamentos, datas, mantendo o que não foi mexido) e `atualizar_campanha` (datas e limite de gasto). A permissão "Renomear" agora se chama "Renomear e editar".
+- Importante: estas ferramentas foram testadas contra uma Meta simulada. Formatos específicos (regras de público, semelhantes, formulários) ainda não foram confirmados em conta real, então teste primeiro numa conta de baixo risco.
+
 ## 5.1.0
 
 - **Públicos de lista de clientes.** O Claude agora cria um público personalizado a partir de um CSV que está no seu Mac e sobe a lista inteira para a Meta, em lotes de 10.000 linhas, na conta padrão do cliente. É a ferramenta `criar_publico_lista`, liberada pela mesma permissão de "criar e duplicar".

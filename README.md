@@ -108,6 +108,14 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `duplicar` | Criar e duplicar | Copia campanha (com conjuntos e anúncios), conjunto (com anúncios) ou anúncio. Cópias pausadas. |
 | `criar_campanha` | Criar e duplicar | Campanha pausada, com orçamento na campanha ou nos conjuntos. |
 | `criar_publico_lista` | Criar e duplicar | Público personalizado a partir de um CSV (com hash SHA-256) do Mac, enviado em lotes; aceita coluna `value` e simulação. |
+| `criar_publico_site` | Criar e duplicar | Público de visitantes do site (todos, URL, evento, exclusão, tempo no site). |
+| `criar_publico_engajamento` | Criar e duplicar | Público de quem engajou com Instagram, página ou vídeo. |
+| `criar_publico_semelhante` | Criar e duplicar | Semelhantes de 1% a 20%, um ou vários, em um ou mais países. |
+| `criar_criativo` | Criar e duplicar | Criativo de imagem, vídeo, carrossel, post existente ou post do Instagram, sem criar o anúncio. |
+| `enviar_video` | Criar e duplicar | Sobe vídeo por link ou do Mac (em pedaços, até 4 GB). |
+| `alterar_publico`, `atualizar_publico_lista` | Renomear e editar | Renomear público; adicionar ou remover pessoas de uma lista. |
+| `atualizar_conjunto`, `atualizar_campanha` | Renomear e editar (limite de gasto: Orçamentos) | Editar segmentação, públicos, posicionamentos, datas e limite de gasto. |
+| `buscar_interesses`, `estimar_publico` | Leitura | Achar IDs de interesses e estimar o tamanho do público. |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
 

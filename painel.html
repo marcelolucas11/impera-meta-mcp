@@ -322,14 +322,17 @@ function desenharConexao() {
 const historicos = {};   // id -> lista de ações
 const rascunhos = {};    // id -> permissões/teto editados e ainda não salvos (sobrevivem a redesenhos)
 const NOMES_ACAO = { alterar_status: "Ativar/pausar", alterar_orcamento: "Orçamento", renomear: "Renomear", duplicar: "Duplicar",
-  criar_campanha: "Criar campanha", criar_conjunto: "Criar conjunto", criar_anuncio: "Criar anúncio" };
+  criar_campanha: "Criar campanha", criar_conjunto: "Criar conjunto", criar_anuncio: "Criar anúncio",
+  criar_criativo: "Criar criativo", enviar_video: "Enviar vídeo", criar_publico_lista: "Público de lista", criar_publico_site: "Público de site",
+  criar_publico_engajamento: "Público de engajamento", criar_publico_semelhante: "Público semelhante", alterar_publico: "Editar público",
+  atualizar_publico_lista: "Atualizar lista do público", atualizar_conjunto: "Editar conjunto", atualizar_campanha: "Editar campanha" };
 
 function desenharPermissoes() {
   const c = cliente(atual); if (!c || !$("#permissoes")) return;
   const rot = estado.rotulos_permissoes || {};
   const ajuda = { status: "Ligar e desligar campanhas, conjuntos e anúncios.", orcamento: "Mudar orçamento diário ou total, limite de CPA e ROAS mínimo.",
-    editar: "Mudar o nome de campanhas, conjuntos e anúncios.", criar: "Criar campanhas, conjuntos e anúncios e duplicar o que já existe. Tudo nasce pausado." };
-  const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear", criar: "Criar e duplicar" };
+    editar: "Renomear e editar segmentação, públicos, posicionamentos e datas de campanhas, conjuntos e públicos.", criar: "Criar campanhas, conjuntos, anúncios, criativos, vídeos e públicos (site, engajamento, semelhante, lista) e duplicar. Tudo nasce pausado." };
+  const titulos = { status: "Ativar e pausar", orcamento: "Orçamentos e lances", editar: "Renomear e editar", criar: "Criar e duplicar" };
   const t = teste[c.id] || {}, d = t.dados;
   const r = rascunhos[c.id] || { permissoes: c.permissoes || [], teto: c.teto || "", exigir_periodo: !!c.exigir_periodo };
   const escrita = r.permissoes.length > 0;
