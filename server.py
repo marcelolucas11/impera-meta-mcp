@@ -1481,9 +1481,10 @@ async def _conta_padrao(c: httpx.AsyncClient, conta: Optional[str] = None) -> di
         raise MetaError(f"A conta {alvo} não está liberada para alterações no cliente '{_cliente_id()}'. "
                         "Contas liberadas: " + (", ".join(liberadas) or "nenhuma")
                         + ". Para liberar, marque-a na ficha do cliente no app. Nada foi alterado.")
-    info = await _get(c, f"act_{alvo}", {"fields": "account_id,name,currency"})
+    info = await _get(c, f"act_{alvo}", {"fields": "account_id,name,currency,timezone_name"})
     _CONTA_USADA.set(alvo)
-    return {"id": alvo, "act": f"act_{alvo}", "nome": info.get("name") or alvo, "moeda": info.get("currency") or "BRL"}
+    return {"id": alvo, "act": f"act_{alvo}", "nome": info.get("name") or alvo, "moeda": info.get("currency") or "BRL",
+            "fuso": info.get("timezone_name") or ""}
 
 
 async def _objeto(c: httpx.AsyncClient, obj_id: str, campos: str = "") -> tuple:
@@ -5076,6 +5077,524 @@ async def status_limites(cliente: _CLIENTE = None) -> str:
         linhas.append("Regras: limite de uso → não insisto; sinal de abuso (613/1996) → paro 60 min; bloqueio 368 → 30 min; "
                       "3 limites em 5 min → 15 min. Escritas na mesma conta saem uma por vez, com intervalo.")
         return "\n".join(linhas)
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── cobrança, orçamento agendado, públicos entre contas, carteira ─────────────────────────
+
+_MOTIVOS_DESATIVADA = {0: "sem motivo", 1: "anúncios reprovados", 2: "violação de IP", 3: "pagamento pendente", 4: "conta de teste",
+                       5: "conta de teste", 6: "risco / revisão", 7: "revisão de integridade", 8: "sem método de pagamento ativo",
+                       9: "pagamento recusado", 10: "conta inativa", 11: "revisão de risco"}
+
+
+@mcp.tool(annotations=_RO)
+async def consultar_cobranca(
+    faturas: Annotated[bool, Field(description="True também lista as últimas faturas da BM (precisa de business_management e da BM no cliente).")] = False,
+    cliente: _CLIENTE = None, conta: _CONTA = None,
+) -> str:
+    """Situação financeira de uma conta de anúncios: status e motivo (se desativada), forma de pagamento, saldo a pagar,
+    total já gasto, limite de gastos da conta e, se pedir, as últimas faturas. Só lê. Use quando os anúncios param de
+    entregar sem motivo claro ou para conferir o limite de gastos antes de uma campanha grande."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            acc = await _resolve_account(c, conta)
+            d = await _get(c, acc["act"], {"fields": "account_status,disable_reason,funding_source_details,spend_cap,amount_spent,balance,"
+                                                      "is_prepay_account,min_daily_budget,business{id,name},currency"})
+            moeda = d.get("currency") or acc["moeda"]
+            fonte = d.get("funding_source_details") or {}
+            status = _ACCOUNT_STATUS.get(int(d.get("account_status") or 0), str(d.get("account_status")))
+            linhas = [f"Cliente: {nome_cliente} | Conta: {acc['nome']} ({acc['id']})",
+                      f"Status: {status}" + (f" | motivo: {_MOTIVOS_DESATIVADA.get(int(d.get('disable_reason')), d.get('disable_reason'))}"
+                                             if d.get("disable_reason") not in (None, 0, "0") else "")]
+            linhas.append("Forma de pagamento: " + (fonte.get("display_string") or "não informada (sem método ativo pode impedir a entrega)"))
+            linhas.append(f"Tipo: {'pré-paga (saldo)' if d.get('is_prepay_account') else 'pós-paga (cartão/fatura)'}")
+            if d.get("balance") is not None:
+                linhas.append(f"Saldo a pagar (balance): {moeda} {(_minor(d.get('balance'), moeda) or 0):,.2f}")
+            if d.get("amount_spent") is not None:
+                linhas.append(f"Total já gasto na conta: {moeda} {(_minor(d.get('amount_spent'), moeda) or 0):,.2f}")
+            cap = _minor(d.get("spend_cap"), moeda)
+            if cap:
+                gasto = _minor(d.get("amount_spent"), moeda) or 0
+                restante = cap - gasto
+                aviso = "  <<< LIMITE QUASE ESGOTADO: anúncios param ao chegar nele" if cap and restante / cap < 0.1 else ""
+                linhas.append(f"Limite de gastos da conta: {moeda} {cap:,.2f} (restam {moeda} {restante:,.2f}){aviso}")
+            else:
+                linhas.append("Limite de gastos da conta: sem limite definido")
+            bm = (d.get("business") or {}).get("id") or re.sub(r"\D", "", _cfg("META_BUSINESS_ID"))
+            if faturas:
+                if not bm:
+                    linhas.append("Faturas: este cliente não tem BM configurada.")
+                else:
+                    try:
+                        fs = await _get(c, f"{bm}/business_invoices", {"fields": "id,invoice_id,invoice_date,due_date,payment_status,amount_due,type", "limit": 12})
+                        rows = [{"fatura": f.get("invoice_id") or f.get("id"), "data": f.get("invoice_date"), "vence": f.get("due_date"),
+                                 "situacao": f.get("payment_status"), "valor": (f.get("amount_due") or {}).get("amount") if isinstance(f.get("amount_due"), dict) else f.get("amount_due")}
+                                for f in fs.get("data") or []]
+                        linhas.append(f"Últimas faturas da BM {bm}: {len(rows)}\n" + _csv(rows, ["fatura", "data", "vence", "situacao", "valor"]))
+                    except MetaError as e:
+                        linhas.append(f"Faturas: não consegui ler ({_scrub(str(e))[:200]}). Exige business_management e acesso à BM.")
+        return "\n".join(linhas)
+    except Exception as e:
+        return _tool_error(e)
+
+
+def _para_timestamp(texto: str, fuso: str, nome: str) -> int:
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(fuso) if fuso else timezone.utc
+    except Exception:
+        tz = timezone.utc
+    t = (texto or "").strip()
+    try:
+        dt = datetime.strptime(t, "%Y-%m-%dT%H:%M") if "T" in t else datetime.strptime(t, "%Y-%m-%d")
+    except ValueError:
+        raise MetaError(f"'{nome}' precisa estar no formato AAAA-MM-DD ou AAAA-MM-DDTHH:MM (horário da conta).")
+    return int(dt.replace(tzinfo=tz).timestamp())
+
+
+@mcp.tool(annotations=_RO)
+async def listar_aumentos_orcamento(
+    campanha_id: Annotated[str, Field(description="ID da campanha.")],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Aumentos de orçamento agendados de uma campanha (período, valor e tipo). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, campanha_id)
+            if tipo != "campaign":
+                raise MetaError(f"Aumentos agendados são de campanha; este ID é {_tipo_frase(tipo)}.")
+            rows = await _get_all(c, f"{campanha_id}/budget_schedules", {"fields": "id,budget_value,budget_value_type,time_start,time_end", "limit": 50})
+        linhas = [{"id": r.get("id"), "tipo": r.get("budget_value_type"), "valor": r.get("budget_value"),
+                   "inicio": _data_hora(r.get("time_start")), "fim": _data_hora(r.get("time_end"))} for r in rows]
+        return f"Cliente: {nome_cliente} | Campanha: {obj.get('name')} ({campanha_id}) | {len(linhas)} aumento(s) agendado(s)\n" + _csv(
+            linhas, ["id", "tipo", "valor", "inicio", "fim"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_MUDA)
+async def agendar_aumento_orcamento(
+    campanha_id: Annotated[str, Field(description="ID da campanha com orçamento de campanha.")],
+    inicio: Annotated[str, Field(description="Início, AAAA-MM-DD ou AAAA-MM-DDTHH:MM, no horário da conta. Precisa estar no futuro.")],
+    fim: Annotated[str, Field(description="Fim, no mesmo formato. Depois dele o orçamento volta ao normal sozinho.")],
+    valor_diario: Annotated[Optional[float], Field(description="Orçamento diário durante o período, na moeda da conta (ex.: 300).", gt=0)] = None,
+    multiplicador: Annotated[Optional[float], Field(description="Ou multiplique o orçamento atual (ex.: 1.5 = 50% a mais).", gt=1)] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Agenda um aumento TEMPORÁRIO do orçamento de uma campanha (datas especiais, final de sorteio): sobe no início e volta
+    sozinho no fim, sem você precisar lembrar. Respeita o teto de orçamento diário do app. Exige 'orçamentos e lances'.
+    Informe valor_diario OU multiplicador. Confirme com o usuário antes de usar."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("orcamento")
+        if (valor_diario is None) == (multiplicador is None):
+            raise MetaError("Informe valor_diario OU multiplicador (um dos dois).")
+        params = dict(campanha_id=campanha_id, inicio=inicio, fim=fim, valor_diario=valor_diario, multiplicador=multiplicador)
+        async with _client() as c:
+            obj, tipo, conta = await _objeto(c, campanha_id, "daily_budget,lifetime_budget")
+            if tipo != "campaign":
+                raise MetaError(f"Aumento agendado é de campanha; este ID é {_tipo_frase(tipo)}.")
+            moeda = conta["moeda"]
+            ini, fi = _para_timestamp(inicio, conta.get("fuso", ""), "inicio"), _para_timestamp(fim, conta.get("fuso", ""), "fim")
+            if ini <= int(datetime.now(timezone.utc).timestamp()):
+                raise MetaError("O início precisa estar no futuro. Nada foi agendado.")
+            if fi <= ini:
+                raise MetaError("O fim precisa ser depois do início. Nada foi agendado.")
+            atual = _minor(obj.get("daily_budget"), moeda)
+            if not atual:
+                raise MetaError("Esta campanha não tem orçamento diário de campanha (os orçamentos ficam nos conjuntos). Nada foi agendado.")
+            if valor_diario is not None:
+                _checar_teto(valor_diario, moeda)
+                dados = {"budget_value": _centavos(valor_diario, moeda), "budget_value_type": "ABSOLUTE"}
+                resumo = f"{moeda} {valor_diario:,.2f}/dia"
+            else:
+                _checar_teto(atual * multiplicador, moeda)
+                dados = {"budget_value": multiplicador, "budget_value_type": "MULTIPLIER"}
+                resumo = f"x{multiplicador:g} ({moeda} {atual * multiplicador:,.2f}/dia)"
+            dados.update(time_start=ini, time_end=fi)
+            try:
+                r = await _post(c, f"{campanha_id}/budget_schedules", dados)
+            except MetaError as e:
+                _registrar("agendar_aumento_orcamento", str(campanha_id), params, False, str(e))
+                raise
+            conferido = ""
+            try:
+                lista = await _get_all(c, f"{campanha_id}/budget_schedules", {"fields": "id,time_start,time_end", "limit": 50})
+                conferido = " [conferido na Meta]" if any(str(x.get("id")) == str(r.get("id")) for x in lista) else \
+                    " ATENÇÃO: não achei o agendamento na lista da campanha; confira com listar_aumentos_orcamento."
+            except MetaError:
+                conferido = " (não consegui reler para confirmar)"
+        msg = (f"Campanha {obj.get('name')} ({campanha_id}): orçamento normal {moeda} {atual:,.2f}/dia; de {inicio} a {fim} fica {resumo} "
+               f"e depois volta ao normal. Agendamento {r.get('id')}.{conferido}")
+        _registrar("agendar_aumento_orcamento", str(campanha_id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+async def _bm_da_conta(c: httpx.AsyncClient, act: str) -> str:
+    try:
+        d = await _get(c, act, {"fields": "business{id}"})
+        return str((d.get("business") or {}).get("id") or "")
+    except MetaError:
+        return ""
+
+
+@mcp.tool(annotations=_RO)
+async def listar_compartilhamento_publico(
+    publico_id: Annotated[str, Field(description="ID do público personalizado (de listar_publicos).")],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Em quais contas de anúncios um público personalizado está compartilhado. Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        if not re.fullmatch(r"\d{5,25}", str(publico_id)):
+            raise MetaError(f"ID de público inválido: {publico_id!r}.")
+        async with _client() as c:
+            pub = await _get(c, str(publico_id), {"fields": "id,name,account_id"})
+            if _so_digitos(pub.get("account_id")) not in _contas_liberadas():
+                raise MetaError("Esse público não é de uma conta liberada deste cliente.")
+            rows = await _get_all(c, f"{publico_id}/adaccounts", {"fields": "id,account_id,name", "limit": 100})
+        linhas = [{"conta": r.get("account_id") or r.get("id"), "nome": r.get("name")} for r in rows]
+        return f"Cliente: {nome_cliente} | Público: {pub.get('name')} ({publico_id}) | {len(linhas)} conta(s)\n" + _csv(linhas, ["conta", "nome"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_CRIA)
+async def compartilhar_publico(
+    publico_id: Annotated[str, Field(description="ID do público personalizado (de listar_publicos).")],
+    contas_destino: Annotated[list[str], Field(description="IDs das contas que vão poder usar o público. Só contas liberadas DESTE cliente e da mesma BM.", min_length=1, max_length=10)],
+    cliente: _CLIENTE = None,
+) -> str:
+    """Compartilha um público (ex.: compradores, visitantes) com outras contas do MESMO cliente e da mesma BM, em vez de
+    recriar em cada uma. Nunca sai das contas liberadas do cliente, nem cruza clientes. Não remove nada. Exige 'criar e duplicar'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        if not re.fullmatch(r"\d{5,25}", str(publico_id)):
+            raise MetaError(f"ID de público inválido: {publico_id!r}.")
+        alvos: list = []
+        for x in contas_destino:
+            d = _so_digitos(x)
+            if not d:
+                raise MetaError(f"Conta inválida: {x!r}.")
+            if d not in _contas_liberadas():
+                raise MetaError(f"A conta {d} não está liberada para o cliente '{_cliente_id()}'. Só compartilho entre contas liberadas dele. Nada foi feito.")
+            if d not in alvos:
+                alvos.append(d)
+        params = dict(publico_id=publico_id, contas_destino=alvos)
+        async with _client() as c:
+            pub = await _get(c, str(publico_id), {"fields": "id,name,account_id,subtype"})
+            origem = _so_digitos(pub.get("account_id"))
+            if origem not in _contas_liberadas():
+                raise MetaError("O público não é de uma conta liberada deste cliente. Nada foi feito.")
+            alvos = [a for a in alvos if a != origem]
+            if not alvos:
+                raise MetaError("O público já pertence a essa conta. Nada foi feito.")
+            bm_o = await _bm_da_conta(c, f"act_{origem}")
+            for a in alvos:
+                bm_d = await _bm_da_conta(c, f"act_{a}")
+                if bm_o and bm_d and bm_o != bm_d:
+                    raise MetaError(f"A conta {a} é de outra BM ({bm_d}) que a do público ({bm_o}); a Meta só compartilha dentro da mesma BM. Nada foi feito.")
+            try:
+                await _post(c, f"{publico_id}/adaccounts", {"adaccounts": alvos})
+            except MetaError as e:
+                _registrar("compartilhar_publico", str(publico_id), params, False, str(e))
+                if e.code == 2655:
+                    raise MetaError(str(e) + " Esse tipo de público não pode ser compartilhado (a Meta exige termos aceitos ou não permite para este tipo).", e.code)
+                raise
+            conferido = ""
+            try:
+                lista = {str(r.get("account_id") or r.get("id")).replace("act_", "") for r in await _get_all(c, f"{publico_id}/adaccounts", {"fields": "id,account_id", "limit": 100})}
+                faltam = [a for a in alvos if a not in lista]
+                conferido = " [conferido na Meta]" if not faltam else f" ATENÇÃO: a Meta ainda não lista: {', '.join(faltam)}."
+            except MetaError:
+                conferido = " (não consegui reler para confirmar)"
+        msg = f"Público '{pub.get('name')}' ({publico_id}) compartilhado com {', '.join(alvos)}.{conferido}"
+        _registrar("compartilhar_publico", str(publico_id), params, True, msg)
+        return f"Cliente: {nome_cliente}\nOK {msg}"
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def resumo_carteira(
+    desde: Annotated[Optional[str], Field(description="Data inicial AAAA-MM-DD. Padrão: 7 dias até ontem.")] = None,
+    ate: Annotated[Optional[str], Field(description="Data final AAAA-MM-DD. Padrão: ontem.")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Visão de todas as contas LIBERADAS de UM cliente lado a lado (gasto, resultados, ROAS...), com totais por moeda.
+    Nunca mistura clientes: só as contas liberadas do cliente escolhido. Alcance e frequência não são somados."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _checar_periodo(desde, ate)
+        d1, d2 = _periodo(desde, ate)
+        liberadas = _contas_liberadas()
+        if not liberadas:
+            raise MetaError(f"O cliente '{_cliente_id()}' não tem contas liberadas. Escolha a conta padrão e as liberadas no app.")
+        linhas, por_moeda, falhas = [], {}, []
+        sem = asyncio.Semaphore(MAX_SIMULTANEAS)
+        async with _client() as c:
+            for a in liberadas:
+                try:
+                    acc = await _resolve_account(c, a)
+                    rows = await _insights(c, acc["act"], "account", d1, d2, False, [], sem)
+                except MetaError as e:
+                    falhas.append(f"{a}: {_scrub(str(e))[:160]}")
+                    continue
+                if not rows:
+                    linhas.append({"conta": acc["nome"], "id": acc["id"], "moeda": acc["moeda"], "gasto": 0.0, "impressoes": 0, "cliques": 0, "compras": 0, "valor_compras": 0.0, "cpa": None, "roas": None, "alcance": None, "frequencia": None})
+                    continue
+                r = rows[0]
+                linhas.append({"conta": acc["nome"], "id": acc["id"], "moeda": acc["moeda"], **{k: r.get(k) for k in ("gasto", "impressoes", "cliques", "compras", "valor_compras", "cpa", "roas", "alcance", "frequencia")}})
+                por_moeda.setdefault(acc["moeda"], []).append(r)
+        out = [f"Cliente: {nome_cliente} | {d1} a {d2} | {len(linhas)} de {len(liberadas)} conta(s) liberada(s) (só as deste cliente)"]
+        out.append(_csv(linhas, ["conta", "id", "moeda", "gasto", "impressoes", "cliques", "compras", "valor_compras", "cpa", "roas", "alcance", "frequencia"]))
+        for moeda, rs in por_moeda.items():
+            t = _derive(_soma(rs))
+            out.append(f"TOTAL {moeda} ({len(rs)} conta(s)): gasto {t['gasto']:,.2f} | impressões {t['impressoes']:,.0f} | cliques {t['cliques']:,.0f} | "
+                       f"compras {t['compras']:,.0f} | valor {t['valor_compras']:,.2f} | ROAS {t['roas'] or 0:.2f} | CPA {t['cpa'] or 0:,.2f}")
+        out.append("Alcance e frequência são de cada conta: não somam entre contas (pessoas se repetem).")
+        out += [f"AVISO conta {f}" for f in falhas]
+        return "\n".join(out)
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── ver criativos, anúncios de vídeo em lote, UTM ─────────────────────────
+
+try:  # mcp 2.x
+    from mcp.server.mcpserver import Image as _Imagem
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import Image as _Imagem
+
+_HOSTS_IMAGEM = ("fbcdn.net", "facebook.com", "fbsbx.com", "cdninstagram.com", "instagram.com")
+_IMAGEM_MAX = 8 * 1024 * 1024
+_IMAGENS_TOTAL = 20 * 1024 * 1024
+
+
+async def _baixar_imagem(url: str, restante: int) -> tuple:
+    """Baixa uma imagem pública de criativo (sem enviar token). Só https e só dos servidores da Meta/Instagram;
+    não segue redirecionamentos para fora; limita o tamanho. Devolve (bytes, formato)."""
+    from urllib.parse import urlparse as _up
+    u = _up(url)
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or not any(host == h or host.endswith("." + h) for h in _HOSTS_IMAGEM):
+        raise MetaError("endereço de imagem fora dos servidores da Meta; não baixei")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0), transport=_TRANSPORT, follow_redirects=False) as ic:
+        async with ic.stream("GET", url) as r:
+            if r.status_code != 200:
+                raise MetaError(f"a imagem respondeu HTTP {r.status_code}")
+            tipo = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+            formato = {"image/jpeg": "jpeg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}.get(tipo)
+            if not formato:
+                raise MetaError(f"tipo de arquivo inesperado ({tipo or 'vazio'})")
+            limite = min(_IMAGEM_MAX, restante)
+            dados = bytearray()
+            async for pedaco in r.aiter_bytes():
+                dados.extend(pedaco)
+                if len(dados) > limite:
+                    raise MetaError("imagem grande demais para mostrar")
+    return bytes(dados), formato
+
+
+@mcp.tool(annotations=_RO)
+async def ver_criativo(
+    anuncio_ids: Annotated[list[str], Field(description="IDs de anúncios (até 4).", min_length=1, max_length=4)],
+    cliente: _CLIENTE = None,
+) -> list:
+    """Mostra o criativo de anúncios: a imagem (ou a capa do vídeo) aparece na conversa, junto de texto, título, link,
+    botão e UTMs. Só lê. Use para analisar qual criativo está performando, em vez de adivinhar pelo nome."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        textos: list = [f"Cliente: {nome_cliente}"]
+        imagens: list = []
+        usado = 0
+        async with _client() as c:
+            for aid in anuncios_unicos(anuncio_ids):
+                obj, tipo, conta = await _objeto(c, aid, "creative{id}")
+                if tipo != "ad":
+                    textos.append(f"{aid}: não é um anúncio ({_tipo_frase(tipo)}).")
+                    continue
+                cid = str((obj.get("creative") or {}).get("id") or "")
+                cr = await _get(c, cid, {"fields": "id,name,title,body,image_url,thumbnail_url,video_id,url_tags,call_to_action_type,"
+                                                   "object_story_spec,effective_object_story_id", "thumbnail_width": 640, "thumbnail_height": 640})
+                spec = cr.get("object_story_spec") or {}
+                dados = spec.get("link_data") or spec.get("video_data") or {}
+                link = dados.get("link") or ((dados.get("call_to_action") or {}).get("value") or {}).get("link")
+                texto = dados.get("message") or cr.get("body")
+                titulo = dados.get("name") or dados.get("title") or cr.get("title")
+                video_id = cr.get("video_id") or dados.get("video_id")
+                capa = cr.get("image_url") or dados.get("image_url") or cr.get("thumbnail_url")
+                if video_id:
+                    try:
+                        capa = (await _get(c, str(video_id), {"fields": "picture"})).get("picture") or capa
+                    except MetaError:
+                        pass
+                resumo = [f"Anúncio {obj.get('name')} ({aid}) | criativo {cid}" + (f" | vídeo {video_id}" if video_id else " | imagem")]
+                if texto: resumo.append(f"  Texto: {str(texto)[:400]}")
+                if titulo: resumo.append(f"  Título: {titulo}")
+                if link: resumo.append(f"  Link: {link}")
+                if cr.get("call_to_action_type"): resumo.append(f"  Botão: {cr['call_to_action_type']}")
+                resumo.append(f"  UTMs (url_tags): {cr.get('url_tags') or 'nenhum'}")
+                if capa:
+                    try:
+                        b, fmt = await _baixar_imagem(capa, _IMAGENS_TOTAL - usado)
+                        usado += len(b)
+                        imagens.append(_Imagem(data=b, format=fmt))
+                        resumo.append(f"  Imagem {len(imagens)} abaixo ({'capa do vídeo' if video_id else 'criativo'}).")
+                    except MetaError as e:
+                        resumo.append(f"  Sem imagem: {_scrub(str(e))}.")
+                else:
+                    resumo.append("  Sem imagem disponível para este criativo.")
+                textos.append("\n".join(resumo))
+        return ["\n".join(textos)] + imagens
+    except Exception as e:
+        return [_tool_error(e)]
+
+
+def anuncios_unicos(ids: list) -> list:
+    out: list = []
+    for x in ids:
+        if str(x) not in out:
+            out.append(str(x))
+    return out
+
+
+VIDEO_ESPERA = 10.0  # segundos entre conferências do processamento do vídeo
+VIDEO_TENTATIVAS = 18
+
+
+@mcp.tool(annotations=_CRIA)
+async def criar_anuncios_video_em_lote(
+    conjunto_id: Annotated[str, Field(description="Conjunto onde os anúncios serão criados.")],
+    videos: Annotated[list[dict], Field(description="Lista de vídeos (até 20). Cada item: {\"url\": \"https://...mp4\" OU \"video_id\": \"...\", \"nome\": \"nome do anúncio\"}.", min_length=1, max_length=20)],
+    pagina_id: Annotated[str, Field(description="Página que assina os anúncios (listar_paginas).")],
+    link: Annotated[str, Field(description="URL de destino.")],
+    texto: Annotated[str, Field(description="Texto principal (igual em todos).")],
+    titulo: Annotated[Optional[str], Field(description="Título (opcional).")] = None,
+    cta: Annotated[_CTAS, Field(description="Botão.")] = "LEARN_MORE",
+    instagram_id: Annotated[Optional[str], Field(description="Conta do Instagram (opcional).")] = None,
+    parametros_url: Annotated[Optional[str], Field(description="UTMs, ex.: utm_source=meta&utm_content={{ad.name}}.")] = None,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Cria vários anúncios de vídeo PAUSADOS de uma vez a partir de links (ou vídeos que já estão na conta): envia cada
+    vídeo, espera a Meta processar, monta o criativo e o anúncio. Nada é repetido: se um falhar, os outros seguem e o
+    relatório diz exatamente o que foi criado. Exige 'criar e duplicar'. Confirme com o usuário antes de usar."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("criar")
+        for k, v in enumerate(videos, 1):
+            if not isinstance(v, dict) or not v.get("nome") or bool(v.get("url")) == bool(v.get("video_id")):
+                raise MetaError(f"Item {k}: informe 'nome' e exatamente um entre 'url' e 'video_id'. Nada foi criado.")
+            if v.get("url") and not str(v["url"]).startswith("https://"):
+                raise MetaError(f"Item {k}: a url do vídeo precisa começar com https://. Nada foi criado.")
+        linhas, criados = [], 0
+        async with _client() as c:
+            _o, _t, conta_ = await _objeto(c, conjunto_id)
+            if _t != "adset":
+                raise MetaError(f"{conjunto_id} não é um conjunto de anúncios. Nada foi criado.")
+            for k, v in enumerate(videos, 1):
+                nome = str(v["nome"])
+                try:
+                    vid = str(v.get("video_id") or "")
+                    if not vid:
+                        _exigir("criar")
+                        r = await _post(c, f"{conta_['act']}/advideos", {"file_url": v["url"], "title": nome})
+                        vid = str(r.get("id") or "")
+                        _registrar("criar_anuncios_video_em_lote", vid, {"url": v["url"], "nome": nome}, True, f"vídeo {vid} enviado")
+                    pronto = False
+                    for _ in range(VIDEO_TENTATIVAS):
+                        try:
+                            await _info_video(c, vid)
+                            pronto = True
+                            break
+                        except MetaError as e:
+                            if "ainda não está pronto" not in str(e):
+                                raise
+                        await asyncio.sleep(VIDEO_ESPERA)
+                    if not pronto:
+                        linhas.append(f"{k}. {nome}: vídeo {vid} enviado, mas a Meta ainda processa. Quando ficar pronto, crie o anúncio com criar_anuncio(video_id='{vid}'). Nada em dobro foi criado.")
+                        continue
+                except MetaError as e:
+                    linhas.append(f"{k}. {nome}: ERRO no vídeo: {_scrub(str(e))}")
+                    continue
+                out = await criar_anuncio(conjunto_id=conjunto_id, nome=nome, pagina_id=pagina_id, instagram_id=instagram_id, link=link, texto=texto,
+                                          titulo=titulo, video_id=vid, cta=cta, parametros_url=parametros_url, cliente=nome_cliente)
+                corpo = out.split("\n", 1)[-1]
+                if out.startswith("ERRO"):
+                    linhas.append(f"{k}. {nome}: {corpo}")
+                else:
+                    criados += 1
+                    linhas.append(f"{k}. OK {corpo}")
+        return f"Cliente: {nome_cliente} | {criados} de {len(videos)} anúncio(s) de vídeo criado(s), todos PAUSADOS\n" + "\n".join(linhas)
+    except Exception as e:
+        return _tool_error(e)
+
+
+_UTM_OK = re.compile(r"^[A-Za-z0-9_\-{}.=&%+~|:/,\[\]]+$")
+
+
+@mcp.tool(annotations=_MUDA)
+async def editar_utm(
+    anuncio_ids: Annotated[list[str], Field(description="Anúncios a corrigir (até 20).", min_length=1, max_length=20)],
+    parametros_url: Annotated[str, Field(description="UTMs novas, ex.: utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{ad.name}}.")],
+    simular: Annotated[bool, Field(description="True só mostra o que mudaria, sem alterar.")] = False,
+    cliente: _CLIENTE = None,
+) -> str:
+    """Troca as UTMs (url_tags) de anúncios que já existem. Um criativo da Meta não pode ser editado, então a ferramenta cria
+    um criativo novo idêntico com as UTMs novas e aponta o anúncio para ele (o antigo permanece). Atenção: em anúncio ATIVO a
+    Meta pode mandar o anúncio de novo para análise. Exige 'renomear e editar'. Use simular=True para ver antes."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        _exigir("editar")
+        novas = parametros_url.strip().lstrip("?")
+        if not novas or len(novas) > 1000 or not _UTM_OK.match(novas):
+            raise MetaError("parametros_url inválido: use pares chave=valor separados por & (até 1000 caracteres), sem espaços.")
+        linhas = []
+        async with _client() as c:
+            for aid in anuncios_unicos(anuncio_ids):
+                params = {"parametros_url": novas, "simular": simular}
+                try:
+                    obj, tipo, conta = await _objeto(c, aid, "creative{id},effective_status")
+                    if tipo != "ad":
+                        raise MetaError(f"{aid} não é um anúncio ({_tipo_frase(tipo)}).")
+                    cid = str((obj.get("creative") or {}).get("id") or "")
+                    cr = await _get(c, cid, {"fields": "id,name,url_tags,object_story_spec,object_story_id,asset_feed_spec,instagram_user_id,degrees_of_freedom_spec"})
+                    if (cr.get("url_tags") or "") == novas:
+                        linhas.append(f"= {obj.get('name')} ({aid}): já está com essas UTMs.")
+                        continue
+                    if simular:
+                        linhas.append(f"SIMULAÇÃO {obj.get('name')} ({aid}) [{obj.get('effective_status')}]: UTMs '{cr.get('url_tags') or 'nenhuma'}' -> '{novas}'")
+                        continue
+                    novo: dict = {"name": f"{cr.get('name') or obj.get('name')} - UTM", "url_tags": novas}
+                    if cr.get("object_story_id") and not cr.get("object_story_spec"):
+                        novo["object_story_id"] = cr["object_story_id"]
+                        if cr.get("instagram_user_id"):
+                            novo["instagram_user_id"] = cr["instagram_user_id"]
+                    else:
+                        if not cr.get("object_story_spec") and not cr.get("asset_feed_spec"):
+                            raise MetaError("não consegui ler o conteúdo do criativo para copiá-lo; nada foi alterado")
+                        for k in ("object_story_spec", "asset_feed_spec", "degrees_of_freedom_spec"):
+                            if cr.get(k):
+                                novo[k] = cr[k]
+                    r = await _post(c, f"{conta['act']}/adcreatives", novo)
+                    await _post(c, str(aid), {"creative": {"creative_id": str(r.get("id"))}})
+                    lido = await _get(c, str(aid), {"fields": "creative{id,url_tags}"})
+                    ok_ = ((lido.get("creative") or {}).get("url_tags") or "") == novas
+                    msg = (f"{obj.get('name')} ({aid}): UTMs trocadas (criativo {cid} -> {r.get('id')})"
+                           + (" [conferido na Meta]" if ok_ else " ATENÇÃO: depois de gravar, a Meta não mostra as UTMs novas; confira no Gerenciador.")
+                           + (" Anúncio ativo: a Meta pode reanalisar." if obj.get("effective_status") == "ACTIVE" else ""))
+                    _registrar("editar_utm", str(aid), params, ok_, msg)
+                    linhas.append(("OK " if ok_ else "ALERTA ") + msg)
+                except MetaError as e:
+                    _registrar("editar_utm", str(aid), params, False, str(e))
+                    linhas.append(f"ERRO {aid}: {_scrub(str(e))}")
+        return f"Cliente: {nome_cliente}\n" + "\n".join(linhas)
     except Exception as e:
         return _tool_error(e)
 
