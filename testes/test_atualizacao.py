@@ -217,7 +217,7 @@ for est_path in (inst3 / ".painel.json",):
 # ── 4. painel da versão anterior ainda aberto quando os arquivos novos chegam (o caso do "Rota desconhecida") ──
 def painel_antigo_no_ar(inst: Path) -> dict:
     """Sobe o painel da 4.0 (sem rota de atualização), como estava no Mac antes de instalar por cima."""
-    for arq in ("painel.py", "server.py", "protecao.py", "cofre.py", "configurar.py", "painel.html"):
+    for arq in ("painel.py", "server.py", "configurar.py", "painel.html"):
         conteudo = subprocess.run(["git", "-C", str(REPO), "show", f"b82ad6d:{arq}"], capture_output=True, check=True).stdout
         (inst / arq).write_bytes(conteudo)
     (inst / "VERSAO").unlink(missing_ok=True)
