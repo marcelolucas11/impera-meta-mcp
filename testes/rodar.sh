@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 PY="${PY:-.venv/bin/python}"
 mkdir -p testes/shots
 falhou=0
+export IMPERA_SEM_RITMO=1  # testes não esperam de verdade (intervalos de escrita, degraus de uso)
 
 rodar() {  # rodar "<título>" comando...
   local titulo="$1"; shift
@@ -42,5 +43,7 @@ rodar "teste A/B, catálogo, criativos avançados, pixel, comentários, BM e ben
 rodar "correções 6.5.1: data do público, catálogos pela BM, público sem subtype, DSA e campos_extras" "$PY" testes/test_651.py .
 rodar "6.6.0: anunciante verificado por ID no conjunto e listar_anunciantes" "$PY" testes/test_660.py .
 rodar "públicos de lista: lotes, valor, simulação, arquivo sem hash, falha no meio" "$PY" testes/test_publicos.py .
+rodar "conferência depois de escrever: relê, pausa o que nasceu ativo, esclarece falha ambígua" "$PY" testes/test_conferencia.py .
+rodar "proteção: limites, disjuntor, abuso, bloqueio, ritmo, status_limites" "$PY" testes/test_limites.py .
 rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

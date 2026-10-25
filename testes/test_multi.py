@@ -140,11 +140,12 @@ async def main():
     out = await server.consultar_insights(desde="2026-09-01", ate="2026-09-14")
     check("2 clientes e nenhum informado: recusa em vez de escolher", out.startswith("ERRO") and "Informe qual" in out and "primos, donaco" in out.replace("donaco, primos", "primos, donaco"), out[:120])
 
+    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="campanha")
+    check("limite de chamadas: não insiste e explica", STATE["rate"] and out.startswith("ERRO") and "Não vou insistir" in out, out[:160])
     n0 = len(LOG)
     out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="campanha"); print(out[:330], "\n")
     check("primos: usa a conta padrão dele e os números dele", f"Cliente: primos | Conta: PRIMOS BM01 CA 01 ({ACC['primos']})" in out and f"gasto BRL {T['primos']['spend']:,.2f}" in out and f"compras {T['primos']['buys']:,.0f}" in out)
     check("primos: todas as chamadas foram com o token do primos", {c for c, _ in LOG[n0:]} == {"primos"})
-    check("limite de chamadas: tentou de novo", STATE["rate"])
 
     n0 = len(LOG)
     out = await server.consultar_insights(cliente="Dona Co", conta="donaco", desde="2026-09-01", ate="2026-09-14", nivel="campanha")

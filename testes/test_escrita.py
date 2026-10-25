@@ -256,8 +256,9 @@ async def main():
 
     # Segurança das repetições
     ESTADO["limite"] = 1; n = len(POSTS)
+    out = await server.renomear(id="120000000000000021", nome="r1", cliente="primos")
+    check("limite de chamadas: não insiste (insistir gera sinal de abuso) e diz que nada foi alterado", [s for _, _, s in posts_desde(n)] == ["limite"] and "Nada foi alterado" in out and "Não vou insistir" in out, out[:160])
     await server.renomear(id="120000000000000021", nome="r1", cliente="primos")
-    check("limite de chamadas: a Meta recusou antes de aplicar, então repete", [s for _, _, s in posts_desde(n)] == ["limite", "ok"])
     ESTADO["falha_500"] = True; n = len(POSTS)
     out = await server.criar_campanha(nome="dupla?", cliente="primos")
     check("falha 500 na criação: não repete e avisa que pode ter sido aplicada", [s for _, _, s in posts_desde(n)] == ["500"] and "PODE ter sido aplicada" in out)

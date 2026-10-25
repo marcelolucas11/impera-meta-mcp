@@ -33,6 +33,8 @@ from typing import Annotated, Any, Literal, Optional, Union, get_args
 import httpx
 from pydantic import Field
 
+import protecao
+
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 except ImportError:  # mcp 1.x
@@ -222,17 +224,51 @@ def _friendly(code: Any, msg: str, status: int) -> str:
     return f"Erro da Meta (código {code}, HTTP {status}): {msg}"
 
 
+def _guardas(client: httpx.AsyncClient, path: str) -> tuple:
+    """Antes de qualquer chamada: se a Meta mandou esperar (ou sinalizou abuso), nem tenta."""
+    token, act = _bearer(client), protecao.conta_do_caminho(path)
+    b = protecao.bloqueio(BASE_DIR, token, act)
+    if b:
+        raise MetaError(protecao.mensagem_bloqueio(b), code="protecao")
+    return token, act
+
+
+def _depois(token: str, act: str, r: httpx.Response, err: dict) -> Optional[dict]:
+    """Depois da resposta: lê o uso nos cabeçalhos e, se for limite/abuso, abre o disjuntor."""
+    uso = protecao.ler_cabecalhos(r.headers)
+    protecao.anotar_uso(token, act, uso)
+    code = err.get("code")
+    sub = err.get("error_subcode")
+    if err and (protecao.e_limite(code) or code == 368 or sub in (protecao.SUBCODE_ABUSO, protecao.SUBCODE_BLOQUEIO_TEMP)):
+        return protecao.registrar_erro(BASE_DIR, token, act, code, sub, uso["espera_min"] or None)
+    if not err and uso["pct"] >= 100:
+        minutos = uso["espera_min"] or 2
+        motivo = f"uso da API em {uso['pct']:.0f}% do limite ({uso['detalhe']})."
+        return {"ate": protecao.abrir(BASE_DIR, token, act, minutos, motivo), "motivo": motivo}
+    return None
+
+
+def _msg_limite(code: Any, msg: str, aberto: Optional[dict]) -> str:
+    quando = (f"Parei de chamar a Meta até {protecao.hora(aberto['ate'])} ({aberto['motivo']}) " if aberto
+              else "Não vou insistir: ")
+    return (f"Limite de chamadas da Meta atingido (código {code}). {quando}"
+            f"Insistir piora o bloqueio. Espere uns minutos, reduza o período ou use exportar_relatorio. Detalhe: {_scrub(msg)}")
+
+
 async def _get(client: httpx.AsyncClient, path: str, params: Optional[dict] = None) -> dict:
     url = f"{GRAPH_HOST}/{_api_version()}/{path.lstrip('/')}"
     params = dict(params or {})
     secret = _cfg("META_APP_SECRET")
     if secret:
         params["appsecret_proof"] = hmac.new(secret.encode(), _bearer(client).encode(), hashlib.sha256).hexdigest()
+    token, act = _guardas(client, path)
 
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
         try:
-            r = await client.get(url, params=params)
+            async with protecao.semaforo(token, act):
+                await protecao.dormir(protecao.degrau(protecao.uso_atual(token, act).get("pct", 0)))
+                r = await client.get(url, params=params)
         except httpx.TimeoutException:
             raise MetaError("A Meta demorou demais para responder esta consulta.", too_much=True)
         except httpx.HTTPError as e:
@@ -245,18 +281,21 @@ async def _get(client: httpx.AsyncClient, path: str, params: Optional[dict] = No
             data = r.json()
         except ValueError:
             data = None
+        err = data.get("error", {}) if isinstance(data, dict) else {}
+        aberto = _depois(token, act, r, err)
         if r.status_code == 200 and isinstance(data, dict) and "error" not in data:
             return data
 
-        err = data.get("error", {}) if isinstance(data, dict) else {}
         code = err.get("code")
         msg = str(err.get("error_user_msg") or err.get("message") or f"HTTP {r.status_code}")
-        if "reduce the amount of data" in msg.lower() or (code == 1 and r.status_code >= 500):
+        if (protecao.e_limite(code) or code == 368
+                or err.get("error_subcode") in (protecao.SUBCODE_ABUSO, protecao.SUBCODE_BLOQUEIO_TEMP)):
+            raise MetaError(_msg_limite(code, msg, aberto), code=code)
+        if ("reduce the amount of data" in msg.lower() or err.get("error_subcode") == protecao.SUBCODE_DADOS_DEMAIS
+                or (code == 1 and r.status_code >= 500)):
             raise MetaError(_friendly(code, msg, r.status_code), code=code, too_much=True)
         retryable = (
-            code in _RATE_CODES
-            or (isinstance(code, int) and 80000 <= code <= 80014)
-            or err.get("is_transient") is True
+            err.get("is_transient") is True
             or code == 2
             or (r.status_code >= 500 and not err)
         )
@@ -1320,14 +1359,18 @@ def _friendly_escrita(code: Any, msg: str, status: int) -> str:
 async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = "POST",
                 arquivos: Optional[dict] = None) -> dict:
     """POST (ou DELETE, para tirar linhas de um público) na Graph API. `arquivos` envia um pedaço de
-    arquivo em multipart (upload de vídeo). Só repete quando a Meta recusou antes de processar (limite
-    de chamadas ou falha de conexão); em qualquer dúvida não repete, para nunca criar nada em dobro."""
+    arquivo em multipart (upload de vídeo). Só repete em falha de conexão antes de enviar; limite de
+    chamadas NÃO é repetido (abre o disjuntor); em qualquer dúvida não repete, para nunca criar nada em dobro."""
     url = f"{GRAPH_HOST}/{_api_version()}/{path.lstrip('/')}"
     form = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) else str(v))
             for k, v in data.items() if v is not None}
     secret = _cfg("META_APP_SECRET")
     if secret:
         form["appsecret_proof"] = hmac.new(secret.encode(), _bearer(client).encode(), hashlib.sha256).hexdigest()
+    token, act = _guardas(client, path)
+    if not act:
+        act = _CONTA_USADA.get() and f"act_{_CONTA_USADA.get()}" or ""
+    await protecao.ritmo_escrita(token, act)
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
         try:
@@ -1350,13 +1393,14 @@ async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = 
         if r.status_code == 200 and isinstance(resposta, dict) and "error" not in resposta:
             return resposta
         err = resposta.get("error", {}) if isinstance(resposta, dict) else {}
+        aberto = _depois(token, act, r, err)
         code = err.get("code")
         msg = str(err.get("error_user_msg") or err.get("message") or f"HTTP {r.status_code}")
         if err.get("error_user_title"):
             msg = f"{err['error_user_title']}: {msg}"
-        if (code in _RATE_CODES or (isinstance(code, int) and 80000 <= code <= 80014)) and not last:
-            await asyncio.sleep(_BACKOFF[attempt])
-            continue
+        if protecao.e_limite(code) or code == 368 or err.get("error_subcode") in (protecao.SUBCODE_ABUSO, protecao.SUBCODE_BLOQUEIO_TEMP):
+            # A Meta recusou antes de processar: nada foi alterado. Não insiste (insistir gera sinal de abuso).
+            raise MetaError("Nada foi alterado. " + _msg_limite(code, msg, aberto), code=code)
         if r.status_code >= 500 or code in (1, 2) or err.get("is_transient"):
             raise MetaError(f"A Meta teve uma falha temporária ({msg}). A alteração PODE ter sido aplicada: "
                             "confira com estrutura_conta antes de repetir.", code=code)
@@ -1458,10 +1502,86 @@ async def _descobrir_tipo(c: httpx.AsyncClient, obj_id: str, obj: dict) -> str:
     return ""
 
 
-def _ok_pausado(tipo: str, novo_id: str, nome: str) -> str:
+def _ok_pausado(tipo: str, novo_id: str, nome: str, nota: str = "") -> str:
     fem = tipo == "Campanha"
-    return (f"{tipo} {'criada PAUSADA' if fem else 'criado PAUSADO'}: {nome} (ID {novo_id}). "
-            "Para ativar, use alterar_status com acao='ativar'.")
+    return (f"{tipo} {'criada PAUSADA' if fem else 'criado PAUSADO'}: {nome} (ID {novo_id}). {nota}".rstrip()
+            + " Para ativar, use alterar_status com acao='ativar'.")
+
+
+async def _status_real(c: httpx.AsyncClient, obj_id: str) -> Optional[str]:
+    """Relê o status na Meta (só leitura). None se não deu para ler."""
+    try:
+        return str((await _get(c, str(obj_id), {"fields": "status"})).get("status") or "") or None
+    except MetaError:
+        return None
+
+
+async def _conferir_pausado(c: httpx.AsyncClient, novo_id: str, filhos: tuple = ()) -> str:
+    """Depois de criar/duplicar: lê de volta o objeto (e os filhos, se for cópia profunda). O que veio
+    ATIVO é pausado na hora, porque tudo que o app cria tem que nascer PAUSADO. Devolve a nota para a resposta."""
+    ids = [(str(novo_id), None)]
+    try:
+        for edge in filhos:
+            for x in await _get_all(c, f"{novo_id}/{edge}", {"fields": "id,status", "limit": 200}):
+                ids.append((str(x.get("id")), x.get("status")))
+    except MetaError:
+        pass
+    ativos, ilegiveis = [], 0
+    for oid, st in ids:
+        st = st or await _status_real(c, oid)
+        if st is None:
+            ilegiveis += 1
+        elif st != "PAUSED":
+            ativos.append(oid)
+    if not ativos:
+        if ilegiveis:
+            return ("(Pedido enviado como PAUSADO, mas não consegui reler o status agora: "
+                    "confira com estrutura_conta antes de ativar.)")
+        return f"Conferido na Meta: {len(ids)} objeto(s) lido(s) de volta, todos PAUSADOS."
+    corrigidos, falhou = [], []
+    for oid in ativos:
+        try:
+            await _post(c, oid, {"status": "PAUSED"})
+            if await _status_real(c, oid) == "PAUSED":
+                corrigidos.append(oid)
+            else:
+                falhou.append(oid)
+        except MetaError:
+            falhou.append(oid)
+    nota = ""
+    if corrigidos:
+        nota += f"ATENÇÃO: a Meta criou {len(corrigidos)} objeto(s) ATIVO(S) ({', '.join(corrigidos[:5])}); pausei na hora e conferi. "
+    if falhou:
+        nota += (f"ALERTA: {len(falhou)} objeto(s) continuam ATIVOS ({', '.join(falhou[:5])}) e não consegui pausar. "
+                 "PAUSE AGORA no Gerenciador ou com alterar_status. ")
+    return nota.strip()
+
+
+async def _esclarecer(c: httpx.AsyncClient, conta: dict, edge: str, nome: str, e: MetaError) -> MetaError:
+    """Falha ambígua numa criação ('pode ter sido aplicada'): procura na conta, só lendo, algo com esse nome
+    criado nos últimos 15 min e diz se já existe, para ninguém criar em dobro nem deixar de criar."""
+    if "PODE ter sido aplicada" not in str(e):
+        return e
+    try:
+        achados = await _get_all(c, f"{conta['act']}/{edge}", {
+            "fields": "id,name,status,created_time", "limit": 50,
+            "filtering": json.dumps([{"field": "name", "operator": "CONTAIN", "value": nome}])})
+    except MetaError:
+        return MetaError(str(e) + " Não consegui consultar a conta agora para conferir.", e.code)
+    agora_ = datetime.now(timezone.utc)
+    recentes = []
+    for x in achados:
+        try:
+            quando = datetime.strptime(str(x.get("created_time")), "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            continue
+        if (agora_ - quando).total_seconds() <= 15 * 60 and x.get("name") == nome:
+            recentes.append(f"{x.get('name')} (ID {x.get('id')}, {x.get('status')})")
+    if recentes:
+        return MetaError(str(e) + " Conferi na Meta: JÁ EXISTE criado agora: " + "; ".join(recentes[:3])
+                         + ". NÃO crie de novo.", e.code)
+    return MetaError(str(e) + " Conferi na Meta: nada com esse nome foi criado nos últimos 15 min; "
+                     "é seguro tentar de novo.", e.code)
 
 
 @mcp.tool(annotations=_MUDA)
@@ -1483,8 +1603,15 @@ async def alterar_status(
                     obj, tipo, _ = await _objeto(c, obj_id, "effective_status")
                     await _post(c, str(obj_id), {"status": status})
                     msg = f"{_TIPO_PT.get(tipo, tipo or 'objeto')} {obj.get('name')} ({obj_id}): {obj.get('effective_status')} -> {status}"
-                    _registrar("alterar_status", str(obj_id), {"acao": acao}, True, msg)
-                    linhas.append("OK " + msg)
+                    lido = await _status_real(c, obj_id)
+                    if lido is None:
+                        msg += " (não consegui reler o status para confirmar)"
+                    elif lido == status:
+                        msg += " [conferido na Meta]"
+                    else:
+                        msg += f" ATENÇÃO: a Meta ainda mostra {lido}, não {status}. Confira no Gerenciador."
+                    _registrar("alterar_status", str(obj_id), {"acao": acao}, lido in (None, status), msg)
+                    linhas.append(("OK " if lido in (None, status) else "ALERTA ") + msg)
                 except MetaError as e:
                     _registrar("alterar_status", str(obj_id), {"acao": acao}, False, str(e))
                     linhas.append(f"ERRO {obj_id}: {_scrub(str(e))}")
@@ -1540,7 +1667,17 @@ async def alterar_orcamento(
             except MetaError as e:
                 _registrar("alterar_orcamento", str(id), params, False, str(e))
                 raise
-        msg = f"{_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}): " + "; ".join(antes)
+            conferido = ""
+            campos_ler = [k for k in ("daily_budget", "lifetime_budget", "bid_amount") if k in dados]
+            if campos_ler:
+                try:
+                    novo = await _get(c, str(id), {"fields": ",".join(campos_ler)})
+                    dif = [k for k in campos_ler if str(novo.get(k)) != str(dados[k])]
+                    conferido = (" [conferido na Meta]" if not dif else
+                                 " ATENÇÃO: depois de gravar, a Meta mostra outro valor em " + ", ".join(dif) + ". Confira no Gerenciador.")
+                except MetaError:
+                    conferido = " (não consegui reler para confirmar)"
+        msg = f"{_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}): " + "; ".join(antes) + conferido
         _registrar("alterar_orcamento", str(id), params, True, msg)
         return f"Cliente: {nome_cliente}\nOK {msg}"
     except Exception as e:
@@ -1638,6 +1775,13 @@ async def duplicar(
                 msg = (f"cópia {n} de {_TIPO_PT.get(tipo, tipo)} {obj.get('name')} ({id}) -> ID {novo}"
                        + (f", {filhos} objetos internos" if filhos else "") + ", PAUSADA")
                 problemas = []
+                if novo:
+                    sub = {"campaign": ("adsets", "ads"), "adset": ("ads",)}.get(tipo, ())
+                    nota = await _conferir_pausado(c, novo, sub)
+                    if nota.startswith(("ATENÇÃO", "ALERTA")):
+                        problemas.append(nota)
+                    else:
+                        msg += f". {nota}"
                 if novo and novo_nome:
                     nome_final = novo_nome if quantidade == 1 else f"{novo_nome} {n}"
                     try:
@@ -1654,7 +1798,7 @@ async def duplicar(
                         problemas.append(f"o orçamento NÃO foi trocado e a cópia está com o do original "
                                          f"({moeda} {diario or 0:,.2f}): {_scrub(str(e))}")
                 if problemas:
-                    msg += ". ATENÇÃO: " + "; ".join(problemas)
+                    msg += ". " + "; ".join(problemas)
                 _registrar("duplicar", str(id), params, not problemas, msg)
                 linhas.append(("OK " if not problemas else "PARCIAL ") + msg)
         fim = "\nPara ativar, use alterar_status com acao='ativar'."
@@ -1890,9 +2034,11 @@ async def criar_campanha(
             try:
                 r = await _post(c, f"{conta['act']}/campaigns", dados)
             except MetaError as e:
+                e = await _esclarecer(c, conta, "campaigns", nome, e)
                 _registrar("criar_campanha", conta["act"], params, False, str(e))
-                raise
-        msg = _ok_pausado("Campanha", str(r.get("id")), nome)
+                raise e
+            nota = await _conferir_pausado(c, str(r.get("id")))
+        msg = _ok_pausado("Campanha", str(r.get("id")), nome, nota)
         if "ONLINE_GAMBLING_AND_GAMING" in categorias_especiais:
             msg += (" Atenção: a Meta só aceita anúncios de jogos e sorteios online de contas autorizadas; sem a autorização "
                     "prévia os anúncios são reprovados.")
@@ -2057,14 +2203,16 @@ async def criar_conjunto(
             dados.update(extras)
             try:
                 r = await _post(c, f"{conta['act']}/adsets", dados)
+                nota = await _conferir_pausado(c, str(r.get("id")))
             except MetaError as e:
+                e = await _esclarecer(c, conta, "adsets", nome, e)
                 _registrar("criar_conjunto", str(campanha_id), params, False, str(e))
                 if "anunciante" in str(e).lower() and not anunciante_id:
                     raise MetaError(str(e) + " Para o Brasil a Meta pede o anunciante verificado pelo ID: rode listar_anunciantes "
                                     "e refaça com anunciante_id (e pagador_id, se for outro). Se a lista vier vazia, verifique o "
                                     "anunciante na conta de anúncios, no Gerenciador.", e.code)
                 raise
-        msg = _ok_pausado("Conjunto", str(r.get("id")), nome)
+        msg = _ok_pausado("Conjunto", str(r.get("id")), nome, nota)
         _registrar("criar_conjunto", str(r.get("id")), params, True, msg)
         return f"Cliente: {nome_cliente} | Campanha: {camp.get('name')} ({campanha_id})\n{msg}"
     except Exception as e:
@@ -2257,10 +2405,12 @@ async def criar_anuncio(
                     criativo_id = str((await _post(c, f"{conta['act']}/adcreatives", criativo)).get("id"))
                 r = await _post(c, f"{conta['act']}/ads", {"name": nome, "adset_id": str(conjunto_id),
                                                            "creative": {"creative_id": str(criativo_id)}, "status": "PAUSED"})
+                nota = await _conferir_pausado(c, str(r.get("id")))
             except MetaError as e:
+                e = await _esclarecer(c, conta, "ads", nome, e)
                 _registrar("criar_anuncio", str(conjunto_id), params, False, str(e))
-                raise
-        msg = _ok_pausado("Anúncio", str(r.get("id")), nome) + f" Criativo: {criativo_id}."
+                raise e
+        msg = _ok_pausado("Anúncio", str(r.get("id")), nome, nota) + f" Criativo: {criativo_id}."
         _registrar("criar_anuncio", str(r.get("id")), params, True, msg)
         return f"Cliente: {nome_cliente} | Conjunto: {conj.get('name')} ({conjunto_id})\n{msg}"
     except Exception as e:
@@ -4853,6 +5003,37 @@ async def benchmark_interno(
                 "Comparativo INTERNO (não é benchmark de setor). Diferença de mais de 25% em cada métrica conta como melhor ou pior; em CPM, CPC e CPA, menor é melhor."]
         topo += [f"AVISO: {a}" for a in avisos]
         return "\n".join(topo) + "\n\n" + _csv(linhas, cols)
+    except Exception as e:
+        return _tool_error(e)
+
+
+# ───────────────────────── proteção: status dos limites ─────────────────────────
+
+@mcp.tool(annotations=_RO)
+async def status_limites(cliente: _CLIENTE = None) -> str:
+    """Mostra se a Meta está limitando o cliente: uso da API em % (lido dos cabeçalhos das últimas
+    chamadas), bloqueios ativos e até que horas o servidor parou de chamar. Não faz nenhuma chamada à
+    Meta e não altera nada. Use antes de um trabalho grande ou quando aparecer 'limite de chamadas'."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        r = protecao.resumo(BASE_DIR, _token(), [f"act_{x}" for x in _contas_liberadas()])
+        linhas = [f"Cliente: {nome_cliente}"]
+        if r["bloqueios"]:
+            for b in r["bloqueios"]:
+                onde = "token inteiro" if b["conta"] == "*" else f"conta {b['conta']}"
+                linhas.append(f"BLOQUEADO ({onde}) até {b['ate']} (~{b['minutos']} min): {b['motivo']}")
+        else:
+            linhas.append("Nenhum bloqueio ativo: o servidor está chamando a Meta normalmente.")
+        if r["uso"]:
+            for u in r["uso"]:
+                aviso = " (perto do limite: o servidor está indo mais devagar)" if u["pct"] >= 70 else ""
+                esp = f", Meta pede ~{round(u['espera_min'])} min" if u["espera_min"] else ""
+                linhas.append(f"Uso {u['conta']}: {u['pct']}%{esp}{aviso}  [{u['detalhe']}]")
+        else:
+            linhas.append("Ainda não li o uso da API neste cliente (nenhuma chamada recente).")
+        linhas.append("Regras: limite de uso → não insisto; sinal de abuso (613/1996) → paro 60 min; bloqueio 368 → 30 min; "
+                      "3 limites em 5 min → 15 min. Escritas na mesma conta saem uma por vez, com intervalo.")
+        return "\n".join(linhas)
     except Exception as e:
         return _tool_error(e)
 
