@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 VERSAO="$(cat VERSAO)"
 rm -rf dist && mkdir -p dist/impera-meta-mcp
-for item in server.py painel.py painel.html configurar.py atualizar.py instalar.sh "Instalar Impera Meta MCP.command" \
+for item in server.py protecao.py cofre.py painel.py painel.html configurar.py atualizar.py instalar.sh "Instalar Impera Meta MCP.command" \
             requirements.txt .env.example VERSAO README.md NOVIDADES.md recursos; do
   cp -R "$item" dist/impera-meta-mcp/
 done

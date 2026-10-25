@@ -46,6 +46,7 @@ rodar "públicos de lista: lotes, valor, simulação, arquivo sem hash, falha no
 rodar "conferência depois de escrever: relê, pausa o que nasceu ativo, esclarece falha ambígua" "$PY" testes/test_conferencia.py .
 rodar "consultas: guardas e relatório assíncrono" "$PY" testes/test_insights_guardas.py .
 rodar "6.7.0: cobrança, aumento agendado, públicos entre contas, carteira, criativos, vídeos em lote, UTM" "$PY" testes/test_novas_ferramentas.py .
+rodar "cofre de tokens no Chaveiro (simulado)" "$PY" testes/test_cofre.py .
 rodar "proteção: limites, disjuntor, abuso, bloqueio, ritmo, status_limites" "$PY" testes/test_limites.py .
 rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

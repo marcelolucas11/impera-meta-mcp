@@ -20,7 +20,7 @@ def instalacao() -> tuple:
     home = Path(tempfile.mkdtemp())
     inst = home / "meta-ads-mcp"
     inst.mkdir()
-    for item in ("server.py", "painel.py", "painel.html", "configurar.py", "atualizar.py", "VERSAO", "recursos", "requirements.txt"):
+    for item in ("server.py", "protecao.py", "cofre.py", "painel.py", "painel.html", "configurar.py", "atualizar.py", "VERSAO", "recursos", "requirements.txt"):
         src = REPO / item
         shutil.copytree(src, inst / item) if src.is_dir() else shutil.copy2(src, inst / item)
     (inst / "clientes").mkdir()

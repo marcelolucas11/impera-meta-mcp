@@ -138,8 +138,30 @@ Alteração (só com a permissão ligada no app para aquele cliente):
 | `listar_usuarios_bm`, `listar_ativos_bm` | Leitura | Usuários e ativos da BM. |
 | `dar_acesso_ativo` | Administrar a BM | Acesso limitado de um usuário da BM a conta ou página. |
 | `benchmark_interno` | Leitura | Compara itens com a mediana da própria conta. |
+| `status_limites` | Leitura | Uso da API em %, bloqueios ativos e até que horas o app parou de chamar a Meta. |
+| `consultar_cobranca` | Leitura | Status, pagamento, saldo, limite de gastos e faturas da conta. |
+| `listar_aumentos_orcamento` | Leitura | Aumentos de orçamento agendados de uma campanha. |
+| `agendar_aumento_orcamento` | Orçamentos e lances | Aumento temporário do orçamento, que volta ao normal sozinho. |
+| `listar_compartilhamento_publico` | Leitura | Contas com as quais um público está compartilhado. |
+| `compartilhar_publico` | Criar e duplicar | Compartilha um público com outras contas do mesmo cliente e da mesma BM. |
+| `resumo_carteira` | Leitura | Contas liberadas de um cliente lado a lado, com totais por moeda. |
+| `ver_criativo` | Leitura | Mostra a imagem (ou capa do vídeo) do anúncio, com texto, link e UTMs. |
+| `criar_anuncios_video_em_lote` | Criar e duplicar | Até 20 anúncios de vídeo pausados a partir de links. |
+| `editar_utm` | Renomear e editar | Troca as UTMs de anúncios existentes (cria criativo idêntico com UTMs novas). |
 | `criar_conjunto` | Criar e duplicar | Conjunto pausado: evento do pixel, orçamento, lance, cidades/estados, idade, gênero, Advantage+. |
 | `criar_anuncio` | Criar e duplicar | Anúncio pausado com criativo existente ou novo (imagem por link, do Mac ou da conta; vídeo da conta). |
+
+## Proteção contra bloqueio da Meta
+
+O app **não insiste** quando a Meta diz que o limite acabou: repetir chamadas é o que gera o sinal de abuso. Ele lê o uso nos
+cabeçalhos da Meta, vai mais devagar perto do limite, e abre um disjuntor por conta (sinal de abuso 60 min, bloqueio 368 30 min,
+3 limites em 5 min 15 min), dizendo até que horas. Escritas na mesma conta saem uma por vez. Use `status_limites` para ver. O prazo
+fica em `.limites.json` (não é apagado em atualizações).
+
+Depois de criar, duplicar ou mudar algo, o app lê de volta na Meta e pausa o que tiver nascido ativo.
+
+**Tokens no Chaveiro do Mac (opcional):** no Terminal, `~/meta-ads-mcp/.venv/bin/python ~/meta-ads-mcp/cofre.py --status`, `--migrar`
+(move os tokens dos arquivos para o Chaveiro, conferindo antes) ou `--desfazer`.
 
 ## O arquivo exportado
 

@@ -1,0 +1,21 @@
+title = "Impera Meta MCP"
+
+[extend]
+useDefault = true
+
+# Token de acesso da Meta (começa com EAA). Nunca pode ir para o repositório.
+[[rules]]
+id = "meta-access-token"
+description = "Token de acesso da Meta"
+regex = '''EAA[A-Za-z0-9]{20,}'''
+tags = ["meta", "token"]
+
+[[rules]]
+id = "meta-app-secret"
+description = "Segredo do app da Meta atribuído a uma variável"
+regex = '''(?i)META_APP_SECRET\s*=\s*['"]?[a-f0-9]{32}['"]?'''
+tags = ["meta", "secret"]
+
+[allowlist]
+description = "Valores falsos usados só pelos testes (a API da Meta é simulada)"
+paths = ['''testes/.*''']

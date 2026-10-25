@@ -1,5 +1,37 @@
 # Novidades
 
+## 6.7.0
+
+Proteção contra bloqueio da Meta, conferência de tudo que o app cria ou muda, e dez ferramentas novas. Atualize pelo app e depois feche e abra o Claude (Cmd+Q).
+
+**Proteção contra limite e bloqueio (o que causou as tempestades de "limite de chamadas")**
+- **Não insiste mais.** Antes, ao receber "limite de chamadas" o app tentava de novo 3 vezes, e essas repetições é que levam a Meta ao sinal de abuso (613/1996). Agora ele para na hora e diz até quando.
+- **Lê o uso da API** nos cabeçalhos da Meta (app, BM, conta, insights). Perto do limite (70%, 80%, 90%) ele vai ficando mais devagar sozinho; em 100% pausa aquela conta pelo tempo que a Meta pediu.
+- **Disjuntor por conta e por cliente:** sinal de abuso (613/1996) para tudo por 60 min; bloqueio temporário (368) para o token por 30 min; 3 limites em 5 min pausam a conta 15 min. A resposta diz "até HH:MM". O prazo fica gravado no Mac (`.limites.json`) e sobrevive a reiniciar o Claude. O limite de um cliente nunca trava outro.
+- **Ritmo:** escritas na mesma conta saem uma por vez, com intervalo; no máximo 6 leituras simultâneas por conta, somando todas as ferramentas.
+- **`status_limites`:** mostra o uso em %, bloqueios ativos e até que horas. Não chama a Meta.
+- **Consultas de resultados:** recusa antes de chamar o que a Meta rejeita (mais de 37 meses; quebras com mais de 13 meses; dia a dia que viraria mais de 120 chamadas). Consulta pesada demais agora vira relatório assíncrono da Meta, em vez de insistir.
+
+**Conferência depois de escrever**
+- `criar_campanha`, `criar_conjunto`, `criar_anuncio` e `duplicar` leem o objeto de volta. Se a Meta devolveu algo ATIVO, o app pausa na hora e avisa. Se não conseguir pausar, vem um ALERTA em maiúsculas. (Era o caso das campanhas que apareceram ativas com R$ 1.000 e R$ 700 por dia.)
+- `alterar_status` e `alterar_orcamento` conferem se a Meta gravou o valor.
+- Falha ambígua ("pode ter sido aplicada"): o app procura na conta, só lendo, um item com esse nome criado nos últimos 15 min e diz se já existe (para não criar em dobro) ou se é seguro tentar de novo.
+
+**Ferramentas novas**
+- `consultar_cobranca`: status e motivo da conta, forma de pagamento, saldo, total gasto, limite de gastos (avisa quando está acabando) e faturas da BM.
+- `agendar_aumento_orcamento` e `listar_aumentos_orcamento`: aumento temporário do orçamento de uma campanha, que volta ao normal sozinho. Respeita o teto do app.
+- `compartilhar_publico` e `listar_compartilhamento_publico`: usa o mesmo público em várias contas do mesmo cliente e da mesma BM. Nunca cruza clientes. (Não existe "descompartilhar": o app não remove nada.)
+- `resumo_carteira`: as contas liberadas de UM cliente lado a lado, com totais por moeda. Alcance e frequência não são somados.
+- `ver_criativo`: a imagem (ou a capa do vídeo) aparece na conversa, com texto, link, botão e UTMs.
+- `criar_anuncios_video_em_lote`: até 20 anúncios de vídeo pausados a partir de links, esperando a Meta processar cada vídeo.
+- `editar_utm`: troca as UTMs de anúncios que já existem (cria um criativo idêntico com as UTMs novas e aponta o anúncio para ele). Tem `simular`.
+
+**Segurança**
+- **Tokens no Chaveiro do Mac (opcional):** `cofre.py --migrar` move os tokens dos arquivos para o Chaveiro; o arquivo fica só com o aviso `keychain:impera-meta-mcp`. Confere a leitura antes de trocar e tem `--desfazer`. No Terminal: `~/meta-ads-mcp/.venv/bin/python ~/meta-ads-mcp/cofre.py --status`. O app continua aceitando token em arquivo.
+- **Varredura de segredos (gitleaks)** a cada envio ao GitHub: se algum token da Meta ou chave for parar no código, a publicação é bloqueada.
+
+Tudo foi testado só contra uma Meta simulada: nenhuma campanha foi criada ou alterada em conta real. Ainda precisa de conferência na conta: cabeçalhos de uso reais, `budget_schedules`, compartilhamento de público, faturas e a leitura do Chaveiro no seu Mac.
+
 ## 6.6.0
 
 Criar conjunto agora funciona com o anunciante verificado, que a Meta exige para anunciar no Brasil.

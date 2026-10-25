@@ -28,8 +28,26 @@ jobs:
       - name: Testes (API da Meta simulada, nenhum token real)
         run: bash testes/rodar.sh
 
+  segredos:
+    # Varre o código e todo o histórico atrás de token da Meta, chaves e segredos. Se achar algo, nada é publicado.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Instalar gitleaks (versão fixa, conferida pelo checksum oficial)
+        run: |
+          V=8.21.2
+          BASE="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+          curl -sSfL -o gitleaks.tar.gz "$BASE/gitleaks_${V}_linux_x64.tar.gz"
+          curl -sSfL -o checksums.txt "$BASE/gitleaks_${V}_checksums.txt"
+          sha256sum --ignore-missing -c checksums.txt
+          tar -xzf gitleaks.tar.gz gitleaks
+      - name: Procurar segredos no código e no histórico
+        run: ./gitleaks git --redact --no-banner --verbose --config .gitleaks.toml
+
   publicar:
-    needs: testes
+    needs: [testes, segredos]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:

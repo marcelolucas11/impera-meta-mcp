@@ -33,6 +33,7 @@ from typing import Annotated, Any, Literal, Optional, Union, get_args
 import httpx
 from pydantic import Field
 
+import cofre
 import protecao
 
 try:  # mcp 2.x
@@ -104,7 +105,7 @@ def _clientes() -> dict:
     out: dict = {}
     if CLIENTES_DIR.is_dir():
         for f in sorted(CLIENTES_DIR.glob("*.env")):
-            v = _read_env(f)
+            v = cofre.resolver(f.stem, _read_env(f))
             if v.get("META_ACCESS_TOKEN") and v["META_ACCESS_TOKEN"] != PLACEHOLDER:
                 out[f.stem] = v
     raiz = _read_env(ENV_FILE)
@@ -160,6 +161,10 @@ def _token() -> str:
     t = _cfg("META_ACCESS_TOKEN")
     if not t or t == PLACEHOLDER:
         raise MetaError("Nenhum cliente selecionado para esta chamada. " + _como_configurar())
+    if t.startswith("keychain:"):
+        raise MetaError(f"O token do cliente '{_cliente_id()}' está no Chaveiro do Mac, mas não consegui lê-lo agora. "
+                        "Confira se o Mac está desbloqueado e se o item 'impera-meta-mcp' existe no app Acesso às Chaves. "
+                        f"Para voltar ao modo antigo: {BASE_DIR / '.venv' / 'bin' / 'python'} {BASE_DIR / 'cofre.py'} --desfazer")
     return t
 
 

@@ -13,7 +13,7 @@ REPO = Path(sys.argv[1]).resolve()
 # O teste troca o HOME; o Playwright procura os navegadores dentro do HOME, então fixa o caminho original antes.
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache") / "ms-playwright"))
 PY = sys.executable
-PROGRAMA = ["server.py", "painel.py", "painel.html", "configurar.py", "atualizar.py", "instalar.sh",
+PROGRAMA = ["server.py", "protecao.py", "cofre.py", "painel.py", "painel.html", "configurar.py", "atualizar.py", "instalar.sh",
             "Instalar Impera Meta MCP.command", "requirements.txt", ".env.example", "VERSAO", "README.md",
             "NOVIDADES.md", "recursos"]
 TOKEN = "TOKEN_DO_CLIENTE_NAO_PODE_SUMIR_123"
@@ -217,7 +217,7 @@ for est_path in (inst3 / ".painel.json",):
 # ── 4. painel da versão anterior ainda aberto quando os arquivos novos chegam (o caso do "Rota desconhecida") ──
 def painel_antigo_no_ar(inst: Path) -> dict:
     """Sobe o painel da 4.0 (sem rota de atualização), como estava no Mac antes de instalar por cima."""
-    for arq in ("painel.py", "server.py", "configurar.py", "painel.html"):
+    for arq in ("painel.py", "server.py", "protecao.py", "cofre.py", "configurar.py", "painel.html"):
         conteudo = subprocess.run(["git", "-C", str(REPO), "show", f"b82ad6d:{arq}"], capture_output=True, check=True).stdout
         (inst / arq).write_bytes(conteudo)
     (inst / "VERSAO").unlink(missing_ok=True)
@@ -265,7 +265,7 @@ check("dados do usuário intactos", (inst4 / "clientes/primos.env").read_text().
 encerrar(inst4); time.sleep(1)
 # 4b. arquivos novos no disco com o painel antigo ainda aberto: abrir o app troca o painel
 velho = painel_antigo_no_ar(inst4)
-for arq in ("painel.py", "server.py", "configurar.py", "painel.html", "atualizar.py", "VERSAO"):
+for arq in ("painel.py", "server.py", "protecao.py", "cofre.py", "configurar.py", "painel.html", "atualizar.py", "VERSAO"):
     shutil.copy2(REPO / arq, inst4 / arq)
 r = subprocess.run([PY, str(inst4 / "painel.py"), "--abrir", "--sem-janela"], cwd=str(inst4), capture_output=True, text=True,
                    timeout=60, env=dict(os.environ, HOME=str(base4)))
