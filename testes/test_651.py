@@ -85,7 +85,7 @@ async def main():
 
     POSTS.clear()
     out = await server.criar_conjunto(campanha_id=CAMP, nome="s", orcamento_diario=10, meta_otimizacao="LINK_CLICKS", cliente="c")
-    check("criar_conjunto sem DSA: erro da Meta vem com a dica de dsa_beneficiario", "dsa_beneficiario" in out and "ERRO" in out, out)
+    check("criar_conjunto sem anunciante: erro da Meta vem com a dica de anunciante_id", "anunciante_id" in out and "ERRO" in out, out)
 
     POSTS.clear()
     out = await server.criar_conjunto(campanha_id=CAMP, nome="s", orcamento_diario=10, meta_otimizacao="LINK_CLICKS",

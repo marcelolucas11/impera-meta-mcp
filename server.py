@@ -1692,7 +1692,8 @@ _META_OTIMIZACAO = Literal["OFFSITE_CONVERSIONS", "VALUE", "LANDING_PAGE_VIEWS",
 # Campos avançados que podem ir num conjunto sem passar pelos parâmetros próprios. Só os que limitam ou
 # refinam a entrega: nada que aumente gasto além do teto do cliente.
 _EXTRAS_CONJUNTO = {"frequency_control_specs", "attribution_spec", "adset_schedule", "pacing_type", "dsa_beneficiary",
-                    "dsa_payor", "is_dynamic_creative", "daily_spend_cap", "lifetime_spend_cap"}
+                    "dsa_payor", "is_dynamic_creative", "daily_spend_cap", "lifetime_spend_cap",
+                    "regional_regulation_identities"}
 
 
 def _data_meta(valor: str, campo: str, fim: bool = False) -> str:
@@ -1976,6 +1977,8 @@ async def criar_conjunto(
     data_fim: Annotated[Optional[str], Field(description="Fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM). Obrigatório com orcamento_total.")] = None,
     dsa_beneficiario: Annotated[Optional[str], Field(description="Quem se beneficia do anúncio (exigência da Meta, DSA). Obrigatório quando a Meta recusa com 'anunciante ausente'. Vale para o conjunto todo.", max_length=200)] = None,
     dsa_pagador: Annotated[Optional[str], Field(description="Quem paga o anúncio (DSA). Vazio: o mesmo do beneficiário.", max_length=200)] = None,
+    anunciante_id: Annotated[Optional[str], Field(description="ID do anunciante VERIFICADO da conta (veja listar_anunciantes). É o que a Meta exige para o Brasil: o nome em texto (dsa_beneficiario) não basta. Vale para o conjunto todo.", max_length=60)] = None,
+    pagador_id: Annotated[Optional[str], Field(description="ID do pagador verificado (veja listar_anunciantes). Vazio: o mesmo do anunciante.", max_length=60)] = None,
     campos_extras: Annotated[Optional[Union[str, dict]], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO))
                                                    + " (limite de frequência, janela de atribuição, horários etc.).")] = None,
     cliente: _CLIENTE = None,
@@ -1996,6 +1999,10 @@ async def criar_conjunto(
         if inicio and fim and inicio > fim:
             raise MetaError("data_fim é anterior à data_inicio.")
         extras = _extras(campos_extras, _EXTRAS_CONJUNTO)
+        if anunciante_id:
+            extras.setdefault("regional_regulation_identities", {
+                "universal_beneficiary": str(anunciante_id).strip(),
+                "universal_payer": str(pagador_id or anunciante_id).strip()})
         if dsa_beneficiario:
             extras.setdefault("dsa_beneficiary", dsa_beneficiario.strip())
             extras.setdefault("dsa_payor", (dsa_pagador or dsa_beneficiario).strip())
@@ -2006,7 +2013,8 @@ async def criar_conjunto(
                   publico_advantage=publico_advantage, publicos_incluir=publicos_incluir, publicos_excluir=publicos_excluir,
                   interesses=interesses, posicionamentos=posicionamentos, destino=destino, meta_otimizacao=meta_otimizacao,
                   pagina_id=pagina_id, data_inicio=data_inicio, data_fim=data_fim, campos_extras=campos_extras,
-                  dsa_beneficiario=dsa_beneficiario, dsa_pagador=dsa_pagador).items() if v is not None}
+                  dsa_beneficiario=dsa_beneficiario, dsa_pagador=dsa_pagador,
+                  anunciante_id=anunciante_id, pagador_id=pagador_id).items() if v is not None}
         alvo = _montar_alvo(paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km, idade_min=idade_min,
                             idade_max=idade_max, genero=genero, publico_advantage=publico_advantage, incluir=publicos_incluir,
                             excluir=publicos_excluir, interesses=interesses, posicoes=posicionamentos)
@@ -2051,8 +2059,10 @@ async def criar_conjunto(
                 r = await _post(c, f"{conta['act']}/adsets", dados)
             except MetaError as e:
                 _registrar("criar_conjunto", str(campanha_id), params, False, str(e))
-                if "anunciante" in str(e).lower() and not dsa_beneficiario:
-                    raise MetaError(str(e) + " Refaça informando dsa_beneficiario (e, se for outro, dsa_pagador): quem se beneficia e quem paga o anúncio.", e.code)
+                if "anunciante" in str(e).lower() and not anunciante_id:
+                    raise MetaError(str(e) + " Para o Brasil a Meta pede o anunciante verificado pelo ID: rode listar_anunciantes "
+                                    "e refaça com anunciante_id (e pagador_id, se for outro). Se a lista vier vazia, verifique o "
+                                    "anunciante na conta de anúncios, no Gerenciador.", e.code)
                 raise
         msg = _ok_pausado("Conjunto", str(r.get("id")), nome)
         _registrar("criar_conjunto", str(r.get("id")), params, True, msg)
@@ -2404,6 +2414,35 @@ async def listar_paginas(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
               "instagram_id": (r.get("instagram_business_account") or {}).get("id"),
               "instagram": (r.get("instagram_business_account") or {}).get("username")} for r in rows],
             ["pagina_id", "pagina", "instagram_id", "instagram"])
+    except Exception as e:
+        return _tool_error(e)
+
+
+@mcp.tool(annotations=_RO)
+async def listar_anunciantes(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
+    """Anunciantes/pagadores VERIFICADOS da conta (os que aparecem na tela do conjunto como 'Concluído'), com o ID para
+    usar em criar_conjunto (anunciante_id e pagador_id). Só lê."""
+    try:
+        nome_cliente = _usar_cliente(cliente)
+        async with _client() as c:
+            conta = await _conta_padrao(c, conta)
+            rows, erros = [], []
+            for caminho, campos in ((f"{conta['act']}/regional_regulation_identities", "id,name,identity_type,verification_status"),
+                                    (f"{conta['act']}/regulated_entities", "id,name,verification_status")):
+                try:
+                    rows = await _get_all(c, caminho, {"fields": campos, "limit": 100})
+                    break
+                except MetaError as e:
+                    erros.append(f"{caminho.split('/', 1)[1]}: {e}")
+        if not rows:
+            dica = ("Nenhuma identidade verificada devolvida pela Meta." + (" Respostas: " + " | ".join(erros) if erros else "")
+                    + " Se o anunciante aparece como 'Concluído' no Gerenciador, copie o ID dele (aba Rede do navegador, "
+                      "requisição regional_regulation_identities) e passe em anunciante_id.")
+            return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n{dica}"
+        return f"Cliente: {nome_cliente} | Conta: {conta['nome']}\n" + _csv(
+            [{"anunciante_id": r.get("id"), "nome": r.get("name"), "tipo": r.get("identity_type"),
+              "situacao": r.get("verification_status")} for r in rows],
+            ["anunciante_id", "nome", "tipo", "situacao"])
     except Exception as e:
         return _tool_error(e)
 

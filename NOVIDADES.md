@@ -1,5 +1,15 @@
 # Novidades
 
+## 6.6.0
+
+Criar conjunto agora funciona com o anunciante verificado, que a Meta exige para anunciar no Brasil.
+
+- **Criar conjunto:** novos campos `anunciante_id` e `pagador_id`. A Meta recusava o conjunto com "anunciante ausente" mesmo com o nome em texto (`dsa_beneficiario`), porque para o Brasil ela quer o anunciante verificado pelo ID. Com `anunciante_id` o app envia o anunciante e o pagador como identidade verificada. Sem `pagador_id`, o pagador é o mesmo do anunciante.
+- **Nova ferramenta `listar_anunciantes`:** mostra os anunciantes verificados da conta (os que aparecem como "Concluído" na tela do conjunto) com o ID de cada um. Se a Meta não devolver a lista, a resposta explica como achar o ID e usar em `anunciante_id`.
+- **Erro de "anunciante ausente"** agora manda usar `listar_anunciantes` e `anunciante_id`.
+- `campos_extras` aceita também `regional_regulation_identities`.
+- Testado só contra Meta simulada. Ainda precisa de conferência na conta real: o nome do campo de identidades que a Meta devolve na lista de anunciantes é o ponto menos certo. Se a lista vier vazia, o ID pode ser copiado do Gerenciador e passado direto em `anunciante_id`.
+
 ## 6.5.1
 
 Correções de problemas achados no primeiro teste na prática, numa conta real.
