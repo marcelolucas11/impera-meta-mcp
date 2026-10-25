@@ -44,6 +44,7 @@ rodar "correções 6.5.1: data do público, catálogos pela BM, público sem sub
 rodar "6.6.0: anunciante verificado por ID no conjunto e listar_anunciantes" "$PY" testes/test_660.py .
 rodar "públicos de lista: lotes, valor, simulação, arquivo sem hash, falha no meio" "$PY" testes/test_publicos.py .
 rodar "conferência depois de escrever: relê, pausa o que nasceu ativo, esclarece falha ambígua" "$PY" testes/test_conferencia.py .
+rodar "consultas: guardas e relatório assíncrono" "$PY" testes/test_insights_guardas.py .
 rodar "proteção: limites, disjuntor, abuso, bloqueio, ritmo, status_limites" "$PY" testes/test_limites.py .
 rodar "app: uma instância, fechar, segundo plano, launchd, permissões na interface" "$PY" testes/test_app.py .
 exit $falhou

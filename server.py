@@ -570,9 +570,47 @@ def _insight_fields(level: str, com_alcance: bool, com_video: bool = False) -> s
     return ",".join(f)
 
 
+ASYNC_ESPERA = 5.0  # segundos entre consultas do andamento de um relatório assíncrono (a Meta pede >= 5 s)
+ASYNC_TENTATIVAS = 120
+MAX_JANELAS = 120  # trava: mais blocos que isso são centenas de chamadas, que a Meta trata como abuso
+
+
+def _guarda_insights(d1: date, d2: date, por_dia: bool, breakdowns: list) -> None:
+    """Recusa, antes de gastar uma única chamada, pedidos que a Meta rejeitaria ou que virariam uma enxurrada."""
+    hoje = date.today()
+    if (hoje - d1).days > 37 * 30:
+        raise MetaError("A Meta só guarda 37 meses de dados de anúncios: o início do período é mais antigo que isso. "
+                        "Escolha um período mais recente. Nada foi consultado.")
+    if breakdowns and (hoje - d1).days > 13 * 30 + 4:
+        raise MetaError("Com quebras (idade, gênero, plataforma...) a Meta só calcula alcance e frequência dos últimos 13 meses. "
+                        "Use um período mais recente ou consulte sem quebra. Nada foi consultado.")
+    if por_dia and ((d2 - d1).days + 1) / JANELA_DIAS > MAX_JANELAS:
+        raise MetaError(f"Esse período dia a dia precisaria de mais de {MAX_JANELAS} chamadas à Meta, o que a leva a limitar a conta. "
+                        "Divida em períodos menores (ou peça sem 'por dia'). Nada foi consultado.")
+
+
+async def _insights_assincrono(client: httpx.AsyncClient, act: str, params: dict) -> list:
+    """Relatório assíncrono da Meta: cria o trabalho, espera terminar (consultando devagar) e lê o resultado.
+    Usado quando uma consulta direta é pesada demais, em vez de insistir e levar limite."""
+    job = await _post(client, f"{act}/insights", {k: v for k, v in params.items() if k not in ("limit",)})
+    rid = str(job.get("report_run_id") or "")
+    if not rid:
+        raise MetaError("A Meta não aceitou criar o relatório assíncrono.")
+    for _ in range(ASYNC_TENTATIVAS):
+        st = await _get(client, rid, {"fields": "async_status,async_percent_completion"})
+        estado = str(st.get("async_status") or "")
+        if estado == "Job Completed":
+            return await _get_all(client, f"{rid}/insights", {"limit": PAGINA})
+        if estado in ("Job Failed", "Job Skipped"):
+            raise MetaError(f"O relatório assíncrono da Meta terminou como '{estado}'. Reduza o período ou as quebras.")
+        await asyncio.sleep(ASYNC_ESPERA)
+    raise MetaError("O relatório assíncrono da Meta não terminou a tempo. Tente de novo mais tarde com período menor.")
+
+
 async def _insights(client: httpx.AsyncClient, act: str, level: str, d1: date, d2: date, por_dia: bool,
                     breakdowns: list, sem: asyncio.Semaphore, campanha_ids: Optional[list] = None,
                     avisos: Optional[list] = None, com_video: bool = False) -> list:
+    _guarda_insights(d1, d2, por_dia, breakdowns)
     com_alcance = "hourly_stats_aggregated_by_advertiser_time_zone" not in breakdowns
     base = {
         "level": level,
@@ -606,6 +644,10 @@ async def _insights(client: httpx.AsyncClient, act: str, level: str, d1: date, d
                 mid = a + (b - a) // 2
                 x, y = await asyncio.gather(fetch(a, mid, com_status), fetch(mid + timedelta(days=1), b, com_status))
                 return x + y
+            if e.too_much:
+                if avisos is not None:
+                    avisos.append(f"{a}..{b}: consulta pesada demais para a forma direta; usei relatório assíncrono da Meta.")
+                return await _insights_assincrono(client, act, params)
             raise
 
     async def run(com_status: bool) -> list:
