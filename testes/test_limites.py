@@ -155,6 +155,22 @@ async def main():
     protecao.dormir = antigo_dormir
     check("escrita seguida na mesma conta espera ~1s e em outra conta não", len(dormidos) == 1 and 0.5 <= dormidos[0] <= 1.0, dormidos)
 
+    # 7b) fila de escrita compartilhada entre processos (arquivo com trava)
+    import subprocess
+    cod = ("import sys,json;sys.path.insert(0,sys.argv[1]);import protecao;from pathlib import Path;"
+           "print(protecao._reservar_vaga(Path(sys.argv[2]),'k:act_1'))")
+    saidas = [subprocess.Popen([sys.executable, "-c", cod, sys.argv[1], str(tmp)], stdout=subprocess.PIPE, text=True) for _ in range(4)]
+    vagas = sorted(float(p.communicate()[0]) for p in saidas)
+    check("4 processos reservam vagas de escrita 1s depois uma da outra", all(b - a >= 0.99 for a, b in zip(vagas, vagas[1:])), [round(v - vagas[0], 2) for v in vagas])
+
+    # 7c) o app (painel) mostra os bloqueios ativos
+    import painel
+    MODO.clear(); MODO[f"act_{A1}"] = limite(613, 1996)
+    await get("a", f"act_{A1}/insights")
+    bl = painel._limites({"_id": "a", "META_ACCESS_TOKEN": TA})
+    check("painel recebe o bloqueio ativo do cliente (e nada de outro cliente)", len(bl) == 1 and bl[0]["conta"] == f"act_{A1}" and not painel._limites({"_id": "b", "META_ACCESS_TOKEN": TB}), bl)
+    protecao.fechar(tmp, TA, f"act_{A1}"); zerar()
+
     # 8) leituras simultâneas por conta ficam limitadas
     ativos = {"n": 0, "max": 0}
     async def lenta(req_):

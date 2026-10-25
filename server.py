@@ -1417,7 +1417,7 @@ async def _post(client: httpx.AsyncClient, path: str, data: dict, metodo: str = 
     token, act = _guardas(client, path)
     if not act:
         act = _CONTA_USADA.get() and f"act_{_CONTA_USADA.get()}" or ""
-    await protecao.ritmo_escrita(token, act)
+    await protecao.ritmo_escrita(token, act, BASE_DIR)
     for attempt in range(len(_BACKOFF) + 1):
         last = attempt == len(_BACKOFF)
         try:
@@ -1644,11 +1644,16 @@ async def alterar_status(
         nome_cliente = _usar_cliente(cliente)
         _exigir("status")
         status = "ACTIVE" if acao == "ativar" else "PAUSED"
-        linhas = []
+        linhas, contas_avisadas = [], set()
         async with _client() as c:
             for obj_id in ids:
                 try:
-                    obj, tipo, _ = await _objeto(c, obj_id, "effective_status")
+                    obj, tipo, conta_obj = await _objeto(c, obj_id, "effective_status")
+                    if status == "ACTIVE" and conta_obj["id"] not in contas_avisadas:
+                        contas_avisadas.add(conta_obj["id"])
+                        aviso = await _aviso_conta(c, conta_obj["act"], conta_obj["moeda"])
+                        if aviso:
+                            linhas.append(f"{aviso} (conta {conta_obj['nome']})")
                     await _post(c, str(obj_id), {"status": status})
                     msg = f"{_TIPO_PT.get(tipo, tipo or 'objeto')} {obj.get('name')} ({obj_id}): {obj.get('effective_status')} -> {status}"
                     lido = await _status_real(c, obj_id)
@@ -5145,6 +5150,28 @@ async def consultar_cobranca(
         return _tool_error(e)
 
 
+async def _aviso_conta(c: httpx.AsyncClient, act: str, moeda: str = "BRL") -> str:
+    """Alerta proativo (só leitura): conta que não está ativa, ou limite de gastos quase esgotado. Texto vazio se está tudo bem
+    ou se não deu para ler (nunca atrapalha a ferramenta que chamou)."""
+    try:
+        d = await _get(c, act, {"fields": "account_status,disable_reason,spend_cap,amount_spent,currency"})
+    except MetaError:
+        return ""
+    moeda = d.get("currency") or moeda
+    avisos = []
+    st = int(d.get("account_status") or 1)
+    if st != 1:
+        avisos.append(f"a conta está {_ACCOUNT_STATUS.get(st, st)}: os anúncios não entregam até resolver (veja consultar_cobranca)")
+    cap, gasto = _minor(d.get("spend_cap"), moeda), _minor(d.get("amount_spent"), moeda) or 0
+    if cap:
+        resta = cap - gasto
+        if resta <= 0:
+            avisos.append(f"o limite de gastos da conta ({moeda} {cap:,.2f}) JÁ FOI ATINGIDO: nada entrega até aumentar o limite")
+        elif resta / cap < 0.10:
+            avisos.append(f"o limite de gastos da conta está acabando: restam {moeda} {resta:,.2f} de {moeda} {cap:,.2f}")
+    return ("AVISO: " + "; ".join(avisos) + ".") if avisos else ""
+
+
 def _para_timestamp(texto: str, fuso: str, nome: str) -> int:
     try:
         from zoneinfo import ZoneInfo
@@ -5348,6 +5375,9 @@ async def resumo_carteira(
                 try:
                     acc = await _resolve_account(c, a)
                     rows = await _insights(c, acc["act"], "account", d1, d2, False, [], sem)
+                    aviso_ = await _aviso_conta(c, acc["act"], acc["moeda"])
+                    if aviso_:
+                        falhas.append(f"{acc['nome']} ({acc['id']}): {aviso_}")
                 except MetaError as e:
                     falhas.append(f"{a}: {_scrub(str(e))[:160]}")
                     continue
@@ -5364,7 +5394,7 @@ async def resumo_carteira(
             out.append(f"TOTAL {moeda} ({len(rs)} conta(s)): gasto {t['gasto']:,.2f} | impressões {t['impressoes']:,.0f} | cliques {t['cliques']:,.0f} | "
                        f"compras {t['compras']:,.0f} | valor {t['valor_compras']:,.2f} | ROAS {t['roas'] or 0:.2f} | CPA {t['cpa'] or 0:,.2f}")
         out.append("Alcance e frequência são de cada conta: não somam entre contas (pessoas se repetem).")
-        out += [f"AVISO conta {f}" for f in falhas]
+        out += [f if f"{f}".find("AVISO:") >= 0 else f"AVISO conta {f}" for f in falhas]
         return "\n".join(out)
     except Exception as e:
         return _tool_error(e)

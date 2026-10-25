@@ -13,3 +13,4 @@ testes/shots/
 dist/
 *.zip
 .limites.json
+.ritmo.json

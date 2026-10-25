@@ -30,7 +30,7 @@ PACOTE = "impera-meta-mcp.zip"
 PAGINA_RELEASES = f"https://github.com/{REPO}/releases"
 
 # Itens da raiz que pertencem ao usuário e nunca são escritos por uma atualização.
-PRESERVAR = {".env", ".limites.json", "clientes", "relatorios", "historico", ".venv", ".painel.json", "painel.log",
+PRESERVAR = {".env", ".limites.json", ".ritmo.json", "clientes", "relatorios", "historico", ".venv", ".painel.json", "painel.log",
              ".aviso-versao", ".versoes-anteriores", ".git"}
 LIMITE_BYTES = 60 * 1024 * 1024
 

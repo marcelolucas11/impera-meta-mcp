@@ -1,5 +1,15 @@
 # Novidades
 
+## 6.7.1
+
+Refinamentos da proteção e avisos antes de ativar. Atualize pelo app e feche e abra o Claude (Cmd+Q).
+
+- **Fila de escrita única:** o espaçamento entre escritas na mesma conta agora vale entre todos os processos do servidor (o Claude Desktop pode abrir mais de um), usando um arquivo com trava (`.ritmo.json`, preservado nas atualizações).
+- **Bloqueios aparecem no app:** na ficha do cliente, um aviso vermelho diz que a Meta limitou, até que horas o app parou e por quê.
+- **Aviso antes de ativar:** `alterar_status` com `ativar` (e `resumo_carteira`) avisa se a conta não está ativa ou se o limite de gastos está acabando ou acabou, antes de você ligar a campanha e ela não entregar.
+- **Teste de interface mais estável:** o teste que falhou de vez em quando no GitHub esperava o painel redesenhar; agora espera.
+- Testado só contra Meta simulada.
+
 ## 6.7.0
 
 Proteção contra bloqueio da Meta, conferência de tudo que o app cria ou muda, e dez ferramentas novas. Atualize pelo app e depois feche e abra o Claude (Cmd+Q).

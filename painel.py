@@ -99,6 +99,15 @@ def _claude() -> dict:
     return {"registrado": registrado, "instalado": caminho.parent.is_dir()}
 
 
+def _limites(v: dict) -> list:
+    """Bloqueios ativos da Meta para este cliente (disjuntor da proteção). Não chama a Meta."""
+    try:
+        tok = server._clientes().get(v.get("_id", ""), v).get("META_ACCESS_TOKEN", "") or v.get("META_ACCESS_TOKEN", "")
+        return server.protecao.resumo(server.BASE_DIR, tok, [])["bloqueios"] if tok else []
+    except Exception:
+        return []
+
+
 def op_estado() -> dict:
     cs = configurar.clientes()
     raiz = configurar.ler_env(configurar.ENV).get("META_ACCESS_TOKEN", "")
@@ -113,6 +122,7 @@ def op_estado() -> dict:
             "permissoes": server._parse_permissoes(v.get("PERMISSOES")),
             "teto": v.get("ORCAMENTO_MAX_DIA", ""),
             "exigir_periodo": server._exige_periodo(v.get("EXIGIR_PERIODO")),
+            "limites": _limites(dict(v, _id=cid)),
         } for cid, v in cs.items()],
         "rotulos_permissoes": server.PERMISSOES,
         "segundo_plano": segundo_plano(),

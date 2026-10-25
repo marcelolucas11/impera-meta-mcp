@@ -253,12 +253,40 @@ def semaforo(token: str, act: str) -> asyncio.Semaphore:
     return _semaforos[k]
 
 
-async def ritmo_escrita(token: str, act: str) -> None:
-    """Espaça escritas na mesma conta (várias ferramentas de escrita juntas viram fila)."""
-    k = chave(token, act)
+ARQUIVO_RITMO = ".ritmo.json"  # instante da última escrita por conta, compartilhado entre todos os processos do servidor
+
+
+def _reservar_vaga(base: Optional[Path], k: str) -> float:
+    """Reserva o próximo instante livre de escrita para a conta `k`. Com `base`, usa um arquivo com trava, de modo que
+    vários processos do servidor (o Claude Desktop pode subir mais de um) formem uma fila só. Devolve o instante."""
     t = agora()
+    if base is not None:
+        try:
+            import fcntl
+            p = Path(base) / ARQUIVO_RITMO
+            fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "r+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    dados = json.loads(f.read() or "{}")
+                except ValueError:
+                    dados = {}
+                dados = {a: v for a, v in dados.items() if isinstance(v, (int, float)) and v > t - 3600}
+                alvo = max(t, float(dados.get(k, 0.0)) + INTERVALO_ESCRITA)
+                dados[k] = alvo
+                f.seek(0); f.truncate(); f.write(json.dumps(dados))
+                return alvo
+        except (OSError, ImportError):
+            pass
     alvo = max(t, _ultima_escrita.get(k, 0.0) + INTERVALO_ESCRITA)
     _ultima_escrita[k] = alvo
+    return alvo
+
+
+async def ritmo_escrita(token: str, act: str, base: Optional[Path] = None) -> None:
+    """Espaça escritas na mesma conta (várias ferramentas de escrita, mesmo em processos diferentes, viram uma fila)."""
+    t = agora()
+    alvo = _reservar_vaga(base, chave(token, act))
     if alvo > t:
         await dormir(min(alvo - t, ESPERA_MAX_SEGUNDOS))
 

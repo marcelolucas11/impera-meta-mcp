@@ -183,9 +183,20 @@ with sync_playwright() as pw:
     expect(pg.locator("#msg-permissoes")).to_contain_text("Permissões salvas")
     env = (inst6 / "clientes/primos.env").read_text()
     check("chave 'Exigir período' grava no cliente", "EXIGIR_PERIODO=1" in env and "PERMISSOES=status,criar" in env, env.replace("\n", " | ")[-80:])
-    pg.evaluate("desenharPermissoes()")
+    # O painel recarrega o estado e redesenha a ficha em segundo plano: espera até a chave aparecer (sem corrida).
+    for _ in range(20):
+        pg.evaluate("desenharPermissoes()")
+        if pg.locator("#chk-periodo").is_checked():
+            break
+        pg.wait_for_timeout(250)
     check("chave 'Exigir período' aparece ligada depois de salvar", pg.locator("#chk-periodo").is_checked())
-    pg.fill("#teto", "abc"); pg.click("#btn-permissoes")
+    for _ in range(8):  # um redesenho no meio pode apagar o texto digitado: repete até a recusa aparecer
+        pg.fill("#teto", "abc"); pg.click("#btn-permissoes")
+        try:
+            expect(pg.locator("#msg-permissoes")).to_contain_text("Teto de orçamento inválido", timeout=1500)
+            break
+        except AssertionError:
+            pg.wait_for_timeout(300)
     expect(pg.locator("#msg-permissoes")).to_contain_text("Teto de orçamento inválido")
     check("teto inválido recusado", "ORCAMENTO_MAX_DIA=1500" in (inst6 / "clientes/primos.env").read_text())
     fundo = pg.locator("#chk-fundo")

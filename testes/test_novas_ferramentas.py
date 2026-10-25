@@ -88,6 +88,8 @@ def handler(req):
     if p.endswith("/ads"):
         S.setdefault("novos", {})[novo] = {"id": novo, "status": "PAUSED"}
         return httpx.Response(200, json={"id": novo})
+    if p == AD and "status" in f:
+        OBJ[AD]["effective_status"] = f["status"]; OBJ[AD]["status"] = f["status"]; return httpx.Response(200, json={"success": True})
     if p == AD and "creative" in f:
         nid = json.loads(f["creative"])["creative_id"]
         OBJ[AD]["creative"] = {"id": nid, "url_tags": S["crs"][nid].get("url_tags")}
@@ -132,6 +134,7 @@ async def main():
 
     out = await server.resumo_carteira(desde="2026-09-01", ate="2026-09-07", cliente="c")
     check("carteira: as 2 contas liberadas e total por moeda", "2 de 2 conta(s)" in out and "TOTAL BRL (2 conta(s)): gasto 150.00" in out and "não somam" in out, out)
+    check("carteira avisa que o limite de gastos está acabando", "AVISO:" in out and "limite de gastos da conta está acabando" in out, out)
     check("carteira não toca na conta de outra BM/cliente", not any(f"act_{A3}" in x for x in S["urls"]))
 
     r = await server.ver_criativo(anuncio_ids=[AD], cliente="c")
@@ -155,6 +158,9 @@ async def main():
     out = await server.editar_utm(anuncio_ids=[AD], parametros_url="com espaço", cliente="c")
     check("UTM inválida é recusada", out.startswith("ERRO") and "inválido" in out, out)
 
+    out = await server.alterar_status(ids=[AD], acao="ativar", cliente="c")
+    check("ativar avisa antes se o limite de gastos da conta está acabando", "AVISO:" in out and "acabando" in out and "[conferido na Meta]" in out, out)
+    OBJ[AD]["effective_status"] = "PAUSED"; OBJ[AD]["status"] = "PAUSED"
     out = await server.criar_anuncios_video_em_lote(
         conjunto_id=ADSET, videos=[{"url": "https://cdn.exemplo.com/a.mp4", "nome": "V1"}, {"url": "https://cdn.exemplo.com/b.mp4", "nome": "V2"}],
         pagina_id="1", link="https://x.com", texto="Oi", parametros_url="utm_source=meta", cliente="c")

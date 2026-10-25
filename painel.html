@@ -250,6 +250,7 @@ function desenharFicha() {
     <div id="erro-teste"></div>
     <section><div class="cab"><h2>Últimos 7 dias</h2><button class="btn leve" type="button" id="btn-resumo">Atualizar</button></div><div id="resumo"></div></section>
     <section><div class="cab"><h2>Conexão</h2></div><div id="conexao"></div></section>
+    <div id="limites"></div>
     <section><div class="cab"><h2>O que o Claude pode fazer</h2></div><div id="permissoes"></div></section>
     <section><div class="cab"><h2>Alterações feitas pelo Claude</h2><button class="btn leve" type="button" id="btn-historico">Atualizar</button></div><div id="historico"></div></section>
     <section><div class="cab"><h2>Relatórios</h2><button class="btn leve" type="button" id="btn-pasta">Abrir pasta</button></div><div id="relatorios"></div></section>
@@ -336,8 +337,13 @@ const NOMES_ACAO = { alterar_status: "Ativar/pausar", alterar_orcamento: "Orçam
   criar_produtos: "Criar produtos", atualizar_produtos: "Editar produtos", criar_criativo_avancado: "Criativo avançado", criar_pixel: "Criar pixel",
   moderar_comentario: "Moderar comentário", responder_comentario: "Responder comentário", dar_acesso_ativo: "Acesso na BM" };
 
+function desenharLimites() {
+  const c = cliente(atual), el = $("#limites"); if (!c || !el) return;
+  el.innerHTML = (c.limites || []).map((b) => `<p class="aviso erro">A Meta limitou este cliente${b.conta === "*" ? "" : " (conta " + esc(b.conta) + ")"}: o app parou de chamar até ${esc(b.ate)} (cerca de ${esc(b.minutos)} min). ${esc(b.motivo)} Insistir só piora.</p>`).join("");
+}
 function desenharPermissoes() {
   const c = cliente(atual); if (!c || !$("#permissoes")) return;
+  desenharLimites();
   const rot = estado.rotulos_permissoes || {};
   const ajuda = { status: "Ligar e desligar campanhas, conjuntos e anúncios.", orcamento: "Mudar orçamento diário ou total, limite de CPA e ROAS mínimo.",
     editar: "Renomear e editar segmentação, públicos, posicionamentos, datas, produtos do catálogo e ocultar comentários.", criar: "Criar campanhas, conjuntos, anúncios, criativos, vídeos, públicos, testes A/B, catálogo e feeds, pixel e conversões, e responder comentários. Tudo nasce pausado.",
