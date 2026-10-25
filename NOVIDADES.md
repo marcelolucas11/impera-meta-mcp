@@ -1,5 +1,16 @@
 # Novidades
 
+## 6.5.1
+
+Correções de problemas achados no primeiro teste na prática, numa conta real.
+
+- **Listar públicos** voltava erro ("'int' object is not subscriptable"): a Meta devolve a data de criação como número. Agora funciona.
+- **Listar catálogos** (e tudo que usa catálogo: produtos, feeds, conjuntos de produtos, criativos de catálogo) falhava porque a Meta tirou esse campo da conta de anúncios. Agora o app lê os catálogos da BM do cliente (próprios e compartilhados). Preencha o ID da BM na ficha do cliente para garantir.
+- **Criar público de site, de engajamento, de lista e semelhante:** se a Meta recusar o parâmetro `subtype` (erro 2654), o app tenta uma vez sem ele. A recusa vem antes de processar, então nada é criado em dobro.
+- **Criar conjunto** agora aceita `dsa_beneficiario` e `dsa_pagador`: a Meta passou a exigir quem se beneficia e quem paga o anúncio. Sem eles, o erro da Meta agora vem com a explicação do que informar.
+- **`campos_extras`** (criar e atualizar conjunto) aceita o JSON como objeto, que é como o Claude Desktop entrega. Antes era rejeitado antes de chegar à Meta.
+- Testado só contra Meta simulada. Ainda precisa de conferência na conta real: o público de site sem `subtype`, e a leitura dos catálogos pela BM.
+
 ## 6.5.0
 
 - **Teste A/B:** `criar_teste_ab` cria o teste da Meta entre 2 a 5 campanhas, conjuntos ou anúncios que já existem (mesmo tipo e mesma conta), dividindo o público em partes iguais. Não cria gasto novo. O resultado aparece em `listar_testes_ab`.

@@ -28,7 +28,7 @@ import sys
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional, get_args
+from typing import Annotated, Any, Literal, Optional, Union, get_args
 
 import httpx
 from pydantic import Field
@@ -1801,13 +1801,16 @@ async def _pagina_da_conta(c: httpx.AsyncClient, conta: dict, pagina_id: Optiona
     return str(pagina_id)
 
 
-def _extras(texto: Optional[str], permitidos: set) -> dict:
+def _extras(texto: Optional[Union[str, dict]], permitidos: set) -> dict:
     if not texto:
         return {}
-    try:
-        d = json.loads(texto)
-    except ValueError:
-        raise MetaError("campos_extras precisa ser um JSON válido (ex.: {\"frequency_control_specs\": [...]}).")
+    if isinstance(texto, dict):  # o Claude Desktop pode entregar o JSON já como objeto
+        d = texto
+    else:
+        try:
+            d = json.loads(texto)
+        except ValueError:
+            raise MetaError("campos_extras precisa ser um JSON válido (ex.: {\"frequency_control_specs\": [...]}).")
     if not isinstance(d, dict):
         raise MetaError("campos_extras precisa ser um objeto JSON.")
     fora = sorted(set(d) - permitidos)
@@ -1971,7 +1974,9 @@ async def criar_conjunto(
     pagina_id: Annotated[Optional[str], Field(description="Página do Facebook (veja listar_paginas). Obrigatória em whatsapp, messenger, instagram_direct e formulario.")] = None,
     data_inicio: Annotated[Optional[str], Field(description="Início (AAAA-MM-DD ou AAAA-MM-DDTHH:MM, no fuso da conta). Vazio: ao ativar.")] = None,
     data_fim: Annotated[Optional[str], Field(description="Fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM). Obrigatório com orcamento_total.")] = None,
-    campos_extras: Annotated[Optional[str], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO))
+    dsa_beneficiario: Annotated[Optional[str], Field(description="Quem se beneficia do anúncio (exigência da Meta, DSA). Obrigatório quando a Meta recusa com 'anunciante ausente'. Vale para o conjunto todo.", max_length=200)] = None,
+    dsa_pagador: Annotated[Optional[str], Field(description="Quem paga o anúncio (DSA). Vazio: o mesmo do beneficiário.", max_length=200)] = None,
+    campos_extras: Annotated[Optional[Union[str, dict]], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO))
                                                    + " (limite de frequência, janela de atribuição, horários etc.).")] = None,
     cliente: _CLIENTE = None,
 ) -> str:
@@ -1991,13 +1996,17 @@ async def criar_conjunto(
         if inicio and fim and inicio > fim:
             raise MetaError("data_fim é anterior à data_inicio.")
         extras = _extras(campos_extras, _EXTRAS_CONJUNTO)
+        if dsa_beneficiario:
+            extras.setdefault("dsa_beneficiary", dsa_beneficiario.strip())
+            extras.setdefault("dsa_payor", (dsa_pagador or dsa_beneficiario).strip())
         params = {k: v for k, v in dict(campanha_id=campanha_id, nome=nome, pixel_id=pixel_id, evento=evento,
                   orcamento_diario=orcamento_diario, orcamento_total=orcamento_total, estrategia_lance=estrategia_lance,
                   limite_cpa=limite_cpa, roas_minimo=roas_minimo, paises=paises, regioes=regioes, cidades=cidades,
                   raio_km=raio_km, idade_min=idade_min, idade_max=idade_max, genero=genero,
                   publico_advantage=publico_advantage, publicos_incluir=publicos_incluir, publicos_excluir=publicos_excluir,
                   interesses=interesses, posicionamentos=posicionamentos, destino=destino, meta_otimizacao=meta_otimizacao,
-                  pagina_id=pagina_id, data_inicio=data_inicio, data_fim=data_fim, campos_extras=campos_extras).items()}
+                  pagina_id=pagina_id, data_inicio=data_inicio, data_fim=data_fim, campos_extras=campos_extras,
+                  dsa_beneficiario=dsa_beneficiario, dsa_pagador=dsa_pagador).items() if v is not None}
         alvo = _montar_alvo(paises=paises, regioes=regioes, cidades=cidades, raio_km=raio_km, idade_min=idade_min,
                             idade_max=idade_max, genero=genero, publico_advantage=publico_advantage, incluir=publicos_incluir,
                             excluir=publicos_excluir, interesses=interesses, posicoes=posicionamentos)
@@ -2042,6 +2051,8 @@ async def criar_conjunto(
                 r = await _post(c, f"{conta['act']}/adsets", dados)
             except MetaError as e:
                 _registrar("criar_conjunto", str(campanha_id), params, False, str(e))
+                if "anunciante" in str(e).lower() and not dsa_beneficiario:
+                    raise MetaError(str(e) + " Refaça informando dsa_beneficiario (e, se for outro, dsa_pagador): quem se beneficia e quem paga o anúncio.", e.code)
                 raise
         msg = _ok_pausado("Conjunto", str(r.get("id")), nome)
         _registrar("criar_conjunto", str(r.get("id")), params, True, msg)
@@ -2082,6 +2093,17 @@ _CTAS_VALIDOS = set(get_args(_CTAS))
 _VIDEOS_OK = {".mp4", ".mov"}
 _VIDEO_MAX_BYTES = 4 * 1024 * 1024 * 1024
 _MIDIAS_CARTAO = ("imagem_hash", "imagem_url", "imagem_arquivo", "video_id")
+
+
+async def _post_publico(c: httpx.AsyncClient, path: str, dados: dict) -> dict:
+    """Cria público. Se a Meta recusar o parâmetro 'subtype' (código 2654, visto em versões novas da API),
+    repete uma vez sem ele: a recusa vem antes de processar, então não cria nada em dobro."""
+    try:
+        return await _post(c, path, dados)
+    except MetaError as e:
+        if "subtype" in dados and (e.code == 2654 or "subtipo" in str(e).lower() or "subtype" in str(e).lower()):
+            return await _post(c, path, {k: v for k, v in dados.items() if k != "subtype"})
+        raise
 
 
 async def _info_video(c: httpx.AsyncClient, video_id: str) -> dict:
@@ -2553,7 +2575,7 @@ async def criar_publico_lista(
                 raise MetaError(f"Já existe um público chamado '{igual.get('name')}' ({igual.get('id')}) nesta conta. "
                                 "Nada foi criado nem enviado. Escolha outro nome.")
             try:
-                r = await _post(c, f"{conta['act']}/customaudiences",
+                r = await _post_publico(c, f"{conta['act']}/customaudiences",
                                 {"name": nome, "subtype": "CUSTOM", "description": descricao,
                                  "customer_file_source": "USER_PROVIDED_ONLY",
                                  "is_value_based": True if usar_valor else None})
@@ -2589,6 +2611,15 @@ async def criar_publico_lista(
         return _tool_error(e)
 
 
+def _data_hora(v: Any) -> str:
+    """A Meta devolve datas ora como texto ISO, ora como segundos unix: aceita os dois."""
+    if v in (None, ""):
+        return ""
+    if isinstance(v, (int, float)) or str(v).isdigit():
+        return datetime.fromtimestamp(int(v), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    return str(v)[:16]
+
+
 @mcp.tool(annotations=_RO)
 async def listar_publicos(cliente: _CLIENTE = None, conta: _CONTA = None) -> str:
     """Públicos personalizados da conta padrão do cliente, com tamanho aproximado e status (para conferir um upload de lista)."""
@@ -2603,7 +2634,7 @@ async def listar_publicos(cliente: _CLIENTE = None, conta: _CONTA = None) -> str
                    "tamanho_min": r.get("approximate_count_lower_bound"), "tamanho_max": r.get("approximate_count_upper_bound"),
                    "processamento": (r.get("operation_status") or {}).get("description"),
                    "entrega": (r.get("delivery_status") or {}).get("description"),
-                   "criado": (r.get("time_created") or "")[:16]} for r in rows]
+                   "criado": _data_hora(r.get("time_created"))} for r in rows]
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(linhas)} público(s)\n" + _csv(
             linhas, ["id", "nome", "tipo", "tamanho_min", "tamanho_max", "processamento", "entrega", "criado"])
     except Exception as e:
@@ -2722,7 +2753,7 @@ async def criar_publico_site(
             rule = _regra_site(str(pixel_id), tipo, url_contem, evento, percentil_tempo, retencao_dias, excluir_evento, excluir_url_contem)
             await _nomes_livres(c, conta, [nome])
             try:
-                r = await _post(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "WEBSITE", "description": descricao,
+                r = await _post_publico(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "WEBSITE", "description": descricao,
                                                                          "rule": rule, "prefill": True})
             except MetaError as e:
                 _registrar("criar_publico_site", conta["act"], params, False, str(e))
@@ -2772,7 +2803,7 @@ async def criar_publico_engajamento(
             conta = await _conta_padrao(c, conta)
             await _nomes_livres(c, conta, [nome])
             try:
-                r = await _post(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "ENGAGEMENT", "description": descricao,
+                r = await _post_publico(c, f"{conta['act']}/customaudiences", {"name": nome, "subtype": "ENGAGEMENT", "description": descricao,
                                                                          "rule": rule, "prefill": True})
             except MetaError as e:
                 _registrar("criar_publico_engajamento", conta["act"], params, False, str(e))
@@ -2826,7 +2857,7 @@ async def criar_publico_semelhante(
                 else:
                     spec["location_spec"] = {"geo_locations": {"countries": codigos}}
                 try:
-                    r = await _post(c, f"{conta['act']}/customaudiences", {"name": n, "subtype": "LOOKALIKE",
+                    r = await _post_publico(c, f"{conta['act']}/customaudiences", {"name": n, "subtype": "LOOKALIKE",
                                                                              "origin_audience_id": str(origem_id), "lookalike_spec": spec})
                     criados.append((n, str(r.get("id"))))
                 except MetaError as e:
@@ -3027,7 +3058,7 @@ async def atualizar_conjunto(
     publico_advantage: Annotated[Optional[bool], Field(description="Liga ou desliga o público Advantage+.")] = None,
     data_inicio: Annotated[Optional[str], Field(description="Novo início (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
     data_fim: Annotated[Optional[str], Field(description="Novo fim (AAAA-MM-DD ou AAAA-MM-DDTHH:MM).")] = None,
-    campos_extras: Annotated[Optional[str], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO)))] = None,
+    campos_extras: Annotated[Optional[Union[str, dict]], Field(description="JSON com campos avançados permitidos: " + ", ".join(sorted(_EXTRAS_CONJUNTO)))] = None,
     cliente: _CLIENTE = None,
 ) -> str:
     """Muda a configuração de um conjunto de anúncios da conta padrão do cliente: públicos incluídos e excluídos,
@@ -3555,8 +3586,32 @@ async def criar_conversao_personalizada(
         return _tool_error(e)
 
 
+async def _catalogos_da_conta(c: httpx.AsyncClient, conta: dict, campos: str = "id,name,product_count,vertical") -> list:
+    """Catálogos do cliente. A Meta tirou product_catalogs da conta de anúncios em algumas versões:
+    nesse caso lê os da BM (próprios e compartilhados)."""
+    try:
+        return await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": campos, "limit": 50})
+    except MetaError as e:
+        if "product_catalogs" not in str(e) and e.code != 100:
+            raise
+    biz = re.sub(r"\D", "", _cfg("META_BUSINESS_ID")) or str(conta.get("bm_id") or "")
+    if not biz:
+        info = await _get(c, conta["act"], {"fields": "business{id}"})
+        biz = str((info.get("business") or {}).get("id") or "")
+    if not biz:
+        raise MetaError("Não achei a BM da conta para listar os catálogos. Preencha o ID da BM (META_BUSINESS_ID) na ficha do cliente.")
+    vistos: dict = {}
+    for borda in ("owned_product_catalogs", "client_product_catalogs"):
+        try:
+            for r in await _get_all(c, f"{biz}/{borda}", {"fields": campos, "limit": 50}):
+                vistos.setdefault(str(r.get("id")), r)
+        except MetaError:
+            continue
+    return list(vistos.values())
+
+
 async def _catalogo_da_conta(c: httpx.AsyncClient, conta: dict, catalogo_id: str) -> dict:
-    cats = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name,product_count,vertical", "limit": 50})
+    cats = await _catalogos_da_conta(c, conta)
     achado = next((x for x in cats if str(x.get("id")) == str(catalogo_id)), None)
     if not achado:
         raise MetaError(f"O catálogo {catalogo_id} não está ligado à conta padrão do cliente. Use listar_catalogos para ver os liberados.")
@@ -3570,7 +3625,7 @@ async def listar_catalogos(cliente: _CLIENTE = None, conta: _CONTA = None) -> st
         nome_cliente = _usar_cliente(cliente)
         async with _client() as c:
             conta = await _conta_padrao(c, conta)
-            rows = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name,product_count,vertical", "limit": 50})
+            rows = await _catalogos_da_conta(c, conta)
         return f"Cliente: {nome_cliente} | Conta: {conta['nome']} | {len(rows)} catálogo(s)\n" + _csv(
             [{"id": r.get("id"), "nome": r.get("name"), "produtos": r.get("product_count"), "vertical": r.get("vertical")} for r in rows],
             ["id", "nome", "produtos", "vertical"])
@@ -4098,7 +4153,7 @@ async def criar_catalogo(
         params = dict(nome=nome, vertical=vertical)
         async with _client() as c:
             conta = await _conta_padrao(c, conta)
-            atuais = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id,name", "limit": 50})
+            atuais = await _catalogos_da_conta(c, conta, "id,name")
             if any(str(a.get("name", "")).strip().lower() == nome.strip().lower() for a in atuais):
                 raise MetaError(f"Já existe um catálogo chamado '{nome}'. Nada foi criado.")
             if atuais and not confirmar_novo:
@@ -4442,7 +4497,7 @@ async def criar_criativo_avancado(
             conta = await _conta_padrao(c, conta)
             await _pagina_da_conta(c, conta, pagina_id)
             if conjunto_produtos_id:
-                cats = await _get_all(c, f"{conta['act']}/product_catalogs", {"fields": "id", "limit": 50})
+                cats = await _catalogos_da_conta(c, conta, "id")
                 achado = False
                 for cat in cats:
                     sets = await _get_all(c, f"{cat['id']}/product_sets", {"fields": "id", "limit": 200})
