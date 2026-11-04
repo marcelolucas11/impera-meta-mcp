@@ -14,10 +14,10 @@ tmp = Path(tempfile.mkdtemp())
 server.BASE_DIR, server.ENV_FILE, server.CLIENTES_DIR = tmp, tmp / ".env", tmp / "clientes"
 server._BACKOFF = (0, 0, 0); server.PAGINA = 40
 (tmp / "clientes").mkdir()
-TOK = {"primos": "TOKEN_PRIMOS_aaa111", "donaco": "TOKEN_DONACO_bbb222", "ruim": "TOKEN_RUIM_ccc333"}
-ACC = {"primos": "111111111111111", "donaco": "333333333333333"}
-(tmp / "clientes/primos.env").write_text(f"NOME=Primos Premiações\nMETA_ACCESS_TOKEN={TOK['primos']}\nMETA_AD_ACCOUNT_ID={ACC['primos']}\n")
-(tmp / "clientes/donaco.env").write_text(f"NOME=Dona Co\nMETA_ACCESS_TOKEN={TOK['donaco']}\nMETA_AD_ACCOUNT_ID=\n")
+TOK = {"alfa": "TOKEN_ALFA_aaa111", "betaco": "TOKEN_BETACO_bbb222", "ruim": "TOKEN_RUIM_ccc333"}
+ACC = {"alfa": "111111111111111", "betaco": "333333333333333"}
+(tmp / "clientes/alfa.env").write_text(f"NOME=Alfa Premiações\nMETA_ACCESS_TOKEN={TOK['alfa']}\nMETA_AD_ACCOUNT_ID={ACC['alfa']}\n")
+(tmp / "clientes/betaco.env").write_text(f"NOME=Beta Co\nMETA_ACCESS_TOKEN={TOK['betaco']}\nMETA_AD_ACCOUNT_ID=\n")
 DONO = {v: k for k, v in TOK.items() if k != "ruim"}
 
 random.seed(7)
@@ -25,7 +25,7 @@ D1, D2 = date(2026, 9, 1), date(2026, 9, 14)
 def ads(prefix, n):
     return [(f"{prefix}0000000000000{i}1", f"[VENDAS] {prefix} camp {i}", "OUTCOME_SALES", f"{prefix}0000000000000{i}2", f"conj {i}",
              f"{prefix}0000000000000{i}3", f"video_{i}", "ARCHIVED" if i == 2 else "ACTIVE") for i in range(1, n + 1)]
-ADS = {"primos": ads("1202", 3), "donaco": ads("1303", 2)}
+ADS = {"alfa": ads("1202", 3), "betaco": ads("1303", 2)}
 AGES, GENDERS, PLATS = ["18-24", "25-34", "35-44"], ["female", "male"], ["facebook", "instagram"]
 FACTS = {}
 for cli, lst in ADS.items():
@@ -133,41 +133,41 @@ def vazou(txt): return any(t in txt for t in TOK.values())
 
 async def main():
     out = await server.listar_clientes(); print(out)
-    check("listar_clientes: 2 clientes, sem tokens", "2 cliente(s)" in out and "primos,Primos Premiações" in out and "donaco" in out and not vazou(out))
+    check("listar_clientes: 2 clientes, sem tokens", "2 cliente(s)" in out and "alfa,Alfa Premiações" in out and "betaco" in out and not vazou(out))
     out = await server.verificar_conexao(); print(out, "\n")
-    check("verificar_conexao sem cliente: testa todos", "[primos] Conexão OK. Token de: sysuser-primos" in out and "[donaco] Conexão OK. Token de: sysuser-donaco" in out)
+    check("verificar_conexao sem cliente: testa todos", "[alfa] Conexão OK. Token de: sysuser-alfa" in out and "[betaco] Conexão OK. Token de: sysuser-betaco" in out)
 
     out = await server.consultar_insights(desde="2026-09-01", ate="2026-09-14")
-    check("2 clientes e nenhum informado: recusa em vez de escolher", out.startswith("ERRO") and "Informe qual" in out and "primos, donaco" in out.replace("donaco, primos", "primos, donaco"), out[:120])
+    check("2 clientes e nenhum informado: recusa em vez de escolher", out.startswith("ERRO") and "Informe qual" in out and "alfa, betaco" in out.replace("betaco, alfa", "alfa, betaco"), out[:120])
 
-    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="campanha")
+    out = await server.consultar_insights(cliente="alfa", desde="2026-09-01", ate="2026-09-14", nivel="campanha")
     check("limite de chamadas: não insiste e explica", STATE["rate"] and out.startswith("ERRO") and "Não vou insistir" in out, out[:160])
     n0 = len(LOG)
-    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="campanha"); print(out[:330], "\n")
-    check("primos: usa a conta padrão dele e os números dele", f"Cliente: primos | Conta: PRIMOS BM01 CA 01 ({ACC['primos']})" in out and f"gasto BRL {T['primos']['spend']:,.2f}" in out and f"compras {T['primos']['buys']:,.0f}" in out)
-    check("primos: todas as chamadas foram com o token do primos", {c for c, _ in LOG[n0:]} == {"primos"})
+    out = await server.consultar_insights(cliente="alfa", desde="2026-09-01", ate="2026-09-14", nivel="campanha"); print(out[:330], "\n")
+    check("alfa: usa a conta padrão dele e os números dele", f"Cliente: alfa | Conta: ALFA BM01 CA 01 ({ACC['alfa']})" in out and f"gasto BRL {T['alfa']['spend']:,.2f}" in out and f"compras {T['alfa']['buys']:,.0f}" in out)
+    check("alfa: todas as chamadas foram com o token do alfa", {c for c, _ in LOG[n0:]} == {"alfa"})
 
     n0 = len(LOG)
-    out = await server.consultar_insights(cliente="Dona Co", conta="donaco", desde="2026-09-01", ate="2026-09-14", nivel="campanha")
-    check("donaco (pelo nome de exibição 'Dona Co'): números dele", "Cliente: donaco" in out and f"gasto BRL {T['donaco']['spend']:,.2f}" in out, out.splitlines()[0])
-    check("donaco: todas as chamadas foram com o token do donaco", {c for c, _ in LOG[n0:]} == {"donaco"})
-    out = await server.consultar_insights(cliente="donaco", desde="2026-09-01", ate="2026-09-14")
-    check("donaco sem conta padrão: pede a conta, não usa a do primos", out.startswith("ERRO") and "não tem conta padrão" in out)
-    out = await server.consultar_insights(cliente="donaco", conta=ACC["primos"], desde="2026-09-01", ate="2026-09-14")
-    check("token do donaco não lê a conta do primos", out.startswith("ERRO") and "permissão" in out and f"{T['primos']['spend']:,.2f}" not in out, out[:90])
-    out = await server.consultar_insights(cliente="donaco", conta="primos")
-    check("donaco não acha conta 'primos' pelo nome", out.startswith("ERRO") and "Nenhuma conta com" in out)
+    out = await server.consultar_insights(cliente="Beta Co", conta="betaco", desde="2026-09-01", ate="2026-09-14", nivel="campanha")
+    check("betaco (pelo nome de exibição 'Beta Co'): números dele", "Cliente: betaco" in out and f"gasto BRL {T['betaco']['spend']:,.2f}" in out, out.splitlines()[0])
+    check("betaco: todas as chamadas foram com o token do betaco", {c for c, _ in LOG[n0:]} == {"betaco"})
+    out = await server.consultar_insights(cliente="betaco", desde="2026-09-01", ate="2026-09-14")
+    check("betaco sem conta padrão: pede a conta, não usa a do alfa", out.startswith("ERRO") and "não tem conta padrão" in out)
+    out = await server.consultar_insights(cliente="betaco", conta=ACC["alfa"], desde="2026-09-01", ate="2026-09-14")
+    check("token do betaco não lê a conta do alfa", out.startswith("ERRO") and "permissão" in out and f"{T['alfa']['spend']:,.2f}" not in out, out[:90])
+    out = await server.consultar_insights(cliente="betaco", conta="alfa")
+    check("betaco não acha conta 'alfa' pelo nome", out.startswith("ERRO") and "Nenhuma conta com" in out)
 
     # chamadas simultâneas de clientes diferentes não se cruzam
     n0 = len(LOG)
     a, b = await asyncio.gather(
-        server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, quebra="idade_genero", max_linhas=3),
-        server.consultar_insights(cliente="donaco", conta=ACC["donaco"], desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, quebra="idade_genero", max_linhas=3))
+        server.consultar_insights(cliente="alfa", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, quebra="idade_genero", max_linhas=3),
+        server.consultar_insights(cliente="betaco", conta=ACC["betaco"], desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, quebra="idade_genero", max_linhas=3))
     cruzou = [(c, p) for c, p in LOG[n0:] if p.startswith("act_") and not p.startswith(f"act_{ACC[c]}")]
-    check("simultâneas: cada token só tocou a própria conta", not cruzou and f"{T['primos']['spend']:,.2f}" in a and f"{T['donaco']['spend']:,.2f}" in b, f"{len(LOG) - n0} requisições, cruzadas={len(cruzou)}")
+    check("simultâneas: cada token só tocou a própria conta", not cruzou and f"{T['alfa']['spend']:,.2f}" in a and f"{T['betaco']['spend']:,.2f}" in b, f"{len(LOG) - n0} requisições, cruzadas={len(cruzou)}")
     check("simultâneas: período dividido e paginado", STATE["too_much"] > 0 and "Linhas: 252" in a and "Linhas: 168" in b, f"{a.splitlines()[1][:12]} / {b.splitlines()[1][:12]}")
 
-    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, com_video=True, max_linhas=3000)
+    out = await server.consultar_insights(cliente="alfa", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, com_video=True, max_linhas=3000)
     linhas = out.split("\n\n", 1)[1].splitlines()
     cab = linhas[0].split(",")
     check("com_video: colunas de vídeo no fim, na ordem", cab[-6:] == ["video_plays", "video_p25", "video_p50", "video_p75", "video_p100", "thruplays"], ",".join(cab[-6:]))
@@ -176,22 +176,22 @@ async def main():
     check("com_video: valores inteiros e coerentes (plays = impressões/4, quartis caindo)",
           all(int(r["video_plays"]) == int(r["impressoes"]) // 4 and int(r["video_p25"]) == int(r["video_plays"]) - 10
               and int(r["thruplays"]) == int(r["video_plays"]) - 50 for r in rr) and len(rr) == 42, f"{len(rr)} linhas")
-    out = await server.consultar_insights(cliente="primos", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, max_linhas=3)
+    out = await server.consultar_insights(cliente="alfa", desde="2026-09-01", ate="2026-09-14", nivel="anuncio", por_dia=True, max_linhas=3)
     check("sem com_video: nada muda (sem colunas de vídeo)", "video_plays" not in out and out.split("\n\n", 1)[1].splitlines()[0].endswith(",ticket"))
-    out = await server.estrutura_conta(cliente="primos", nivel="anuncios", somente_ativos=False)
+    out = await server.estrutura_conta(cliente="alfa", nivel="anuncios", somente_ativos=False)
     est = json.loads(next(l for l in out.splitlines() if l.startswith("[")))
     check("estrutura anúncios: tipo do criativo e video_id", [e.get("tipo_criativo") for e in est] == ["VIDEO", "SHARE", "VIDEO"]
           and est[0].get("video_id") and "video_id" not in est[1], json.dumps(est[:2], ensure_ascii=False)[:160])
 
-    out = await server.estrutura_conta(cliente="primos", nivel="conjuntos")
-    check("estrutura: limite de CPA em reais", "Cliente: primos" in out and '"limite_cpa_ou_lance":6.0' in out)
+    out = await server.estrutura_conta(cliente="alfa", nivel="conjuntos")
+    check("estrutura: limite de CPA em reais", "Cliente: alfa" in out and '"limite_cpa_ou_lance":6.0' in out)
 
     outs = {}
-    for cli in ("primos", "donaco"):
+    for cli in ("alfa", "betaco"):
         outs[cli] = await server.exportar_relatorio(cliente=cli, conta=ACC[cli], desde="2026-09-01", ate="2026-09-14")
-    print(outs["primos"], "\n")
+    print(outs["alfa"], "\n")
     from openpyxl import load_workbook
-    for cli in ("primos", "donaco"):
+    for cli in ("alfa", "betaco"):
         path = Path(outs[cli].splitlines()[0].split(": ", 1)[1])
         check(f"export {cli}: arquivo na pasta do cliente", path.parent == tmp / "relatorios" / cli and path.name.startswith(f"meta-ads_{cli}_"), str(path.relative_to(tmp)))
         wb = load_workbook(path, read_only=True)
@@ -207,18 +207,18 @@ async def main():
     out = await server.listar_contas(cliente="ruim"); print(out)
     check("token inválido: erro cita o cliente e não vaza token", out.startswith("ERRO") and "cliente 'ruim'" in out and not vazou(out))
     out = await server.verificar_conexao()
-    check("um cliente com token ruim não derruba os outros", "[primos] Conexão OK" in out and "[ruim] ERRO" in out and not vazou(out))
+    check("um cliente com token ruim não derruba os outros", "[alfa] Conexão OK" in out and "[ruim] ERRO" in out and not vazou(out))
     out = await server.consultar_insights(cliente="inexistente")
-    check("cliente inexistente: lista os configurados", out.startswith("ERRO") and "não está configurado" in out and "primos" in out)
+    check("cliente inexistente: lista os configurados", out.startswith("ERRO") and "não está configurado" in out and "alfa" in out)
     check("nenhuma saída vazou token", not any(vazou(o) for o in list(outs.values()) + [a, b]))
     check("somente GET, token nunca em URL (asserts no servidor falso)", True)
 
     for f in (tmp / "clientes").glob("*.env"): f.unlink()
     out = await server.listar_contas()
     check("sem clientes: orienta a rodar o configurador", out.startswith("ERRO") and "Nenhum cliente configurado" in out and "configurar.py" in out)
-    (tmp / ".env").write_text("META_ACCESS_TOKEN=" + TOK["primos"] + "\nMETA_AD_ACCOUNT_ID=" + ACC["primos"] + "\n")
+    (tmp / ".env").write_text("META_ACCESS_TOKEN=" + TOK["alfa"] + "\nMETA_AD_ACCOUNT_ID=" + ACC["alfa"] + "\n")
     out = await server.consultar_insights(desde="2026-09-01", ate="2026-09-14")
-    check("instalação antiga (.env único) segue funcionando como 'padrao'", "Cliente: padrao" in out and f"{T['primos']['spend']:,.2f}" in out)
+    check("instalação antiga (.env único) segue funcionando como 'padrao'", "Cliente: padrao" in out and f"{T['alfa']['spend']:,.2f}" in out)
 
 asyncio.run(main())
 print(f"\n{sum(ok)}/{len(ok)} verificações passaram"); sys.exit(0 if all(ok) else 1)

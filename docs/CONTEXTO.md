@@ -111,21 +111,21 @@ Atualização e reinstalação nunca escrevem nos itens marcados "Nunca".
 
 ## 6. Estado atual
 
-- **Mac do Marcelo:** MacBook Air Apple Silicon. Cliente cadastrado: Sort dos Primos (`sort-dos-primos`), conta CA 01 PRIMOS (4031218843828590). O token tem `ads_read`, `ads_management` e `business_management`. Segundo plano ligado.
+- **Mac do Marcelo:** MacBook Air Apple Silicon. Clientes reais cadastrados (nomes e contas ficam fora do repositório público, no projeto privado do Claude). O token do primeiro cliente tem `ads_read`, `ads_management` e `business_management`. Segundo plano ligado.
 - **Mac do sócio:** app instalado, com os clientes dele.
 - **Marketing API:** v26.0.
 - **Testes:** centenas de verificações, todas contra uma API da Meta simulada (`bash testes/rodar.sh`), rodando também no GitHub Actions a cada envio.
 
 ## 7. O que ainda não foi verificado
 
-- **Alterações contra a Meta de verdade:** `alterar_status` e `alterar_orcamento` já rodaram na Sort dos Primos (20/10/2026, depois da 5.0.4). `duplicar` com `orcamento_diario`, o filtro por veiculação (`filtering` por `id IN` nos edges campaigns/adsets/ads, com plano B de filtrar localmente) e as ferramentas de criação ainda só rodaram contra a simulação.
+- **Alterações contra a Meta de verdade:** `alterar_status` e `alterar_orcamento` já rodaram num cliente real (20/10/2026, depois da 5.0.4). `duplicar` com `orcamento_diario`, o filtro por veiculação (`filtering` por `id IN` nos edges campaigns/adsets/ads, com plano B de filtrar localmente) e as ferramentas de criação ainda só rodaram contra a simulação.
 - **Partes que só existem no Mac:** janela nativa, ícone no Dock, segundo plano com nome e logo em Itens de Início de Sessão. O Marcelo confirmou o app rodando e pediu o ícone (5.0.1) e o nome no segundo plano (5.0.2); falta confirmar o resultado da 5.0.2.
 - **"Item de desenvolvedor não identificado":** só some com o app assinado e notarizado com Apple Developer ID (conta paga). Hoje o app é assinado localmente (ad-hoc).
 
 ## 8. Ideias e pedidos em aberto
 
 - Skill que exporta o relatório, roda o prompt de análise v4 e publica o painel do cliente.
-- Painel (dash) do Sorteio dos Primos atualizado toda segunda às 00:01 com a semana anterior, como tarefa agendada, no molde do painel da Dona Coelha.
+- Painel (dash) semanal de um cliente atualizado toda segunda às 00:01 com a semana anterior, como tarefa agendada, no molde de um painel que já existe para outro cliente.
 - Preferência do Marcelo: instalar apps novos no SSD externo (`/Volumes/SSD-MARCELO/Aplicativos`). O Impera Meta MCP hoje vai para a pasta Aplicativos do Mac; mudar isso exige cuidado porque o servidor do Claude e o segundo plano precisam do disco montado.
 
 ## 9. Como continuar numa conversa nova

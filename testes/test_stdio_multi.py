@@ -18,11 +18,11 @@ assert len(escrita) == 33 and all(a.get("readOnlyHint") is False for a in escrit
 print("ferramentas de alteração marcadas como não somente leitura:", sorted(escrita))
 # 6 chamadas disparadas de uma vez, alternando clientes
 for i in range(6):
-    send({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {"cliente": "primos" if i % 2 == 0 else "donaco", "desde": "2026-09-01", "ate": "2026-09-02"}}})
+    send({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call", "params": {"name": "consultar_insights", "arguments": {"cliente": "alfa" if i % 2 == 0 else "betaco", "desde": "2026-09-01", "ate": "2026-09-02"}}})
 ordem, ok = [], True
 for _ in range(6):
-    r = recv(); i = r["id"] - 10; esperado = "primos" if i % 2 == 0 else "donaco"; txt = r["result"]["content"][0]["text"]
-    certo = f"Cliente: {esperado}" in txt and f"campanha-do-{esperado}" in txt and ("111.00" if esperado == "primos" else "333.00") in txt and "ERRO" not in txt
+    r = recv(); i = r["id"] - 10; esperado = "alfa" if i % 2 == 0 else "betaco"; txt = r["result"]["content"][0]["text"]
+    certo = f"Cliente: {esperado}" in txt and f"campanha-do-{esperado}" in txt and ("111.00" if esperado == "alfa" else "333.00") in txt and "ERRO" not in txt
     ordem.append(f"{i}:{esperado}:{'ok' if certo else 'ERRADO'}"); ok &= certo
     if not certo: print(txt[:300])
 print("respostas na ordem de chegada:", " ".join(ordem))

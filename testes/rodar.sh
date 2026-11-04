@@ -29,6 +29,7 @@ rodar() {  # rodar "<título>" comando...
   rm -f "$saida"
 }
 
+rodar "segredos: nenhum token ou chave em nenhum arquivo, inclusive nos testes" "$PY" testes/test_segredos.py .
 rodar "servidor MCP: vários clientes, isolamento de tokens, exportação" "$PY" testes/test_multi.py .
 rodar "protocolo MCP via stdio: chamadas simultâneas de clientes diferentes" "$PY" testes/test_stdio_multi.py "$PY" testes/wrap_server.py .
 rodar "app (painel) num navegador real" env PYTHONPATH=testes "$PY" testes/test_painel.py "$PY" . testes

@@ -19,12 +19,12 @@ server.BASE_DIR, server.ENV_FILE, server.CLIENTES_DIR, server.HISTORICO_DIR = tm
 server._BACKOFF = (0, 0, 0)
 server._LOTE_PUBLICO = 3
 (tmp / "clientes").mkdir()
-TOKEN = "TOKEN_PUBLICOS_PRIMOS_cc33"
+TOKEN = "TOKEN_PUBLICOS_ALFA_cc33"
 
 
 def cliente(permissoes):
-    (tmp / "clientes/primos.env").write_text(
-        f"NOME=primos\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID=111111111111111\nPERMISSOES={permissoes}\n")
+    (tmp / "clientes/alfa.env").write_text(
+        f"NOME=alfa\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID=111111111111111\nPERMISSOES={permissoes}\n")
 
 
 def h(x):
@@ -65,7 +65,7 @@ def handler(req):
     p = urlparse(str(req.url)).path.split("/", 2)[2]
     if req.method == "GET":
         if p == "act_111111111111111":
-            return httpx.Response(200, json={"account_id": "111111111111111", "name": "CA 01 PRIMOS", "currency": "BRL"})
+            return httpx.Response(200, json={"account_id": "111111111111111", "name": "CA 01 ALFA", "currency": "BRL"})
         if p == "act_111111111111111/customaudiences":
             return httpx.Response(200, json={"data": [dict(a, subtype="CUSTOM", approximate_count_lower_bound=1000, approximate_count_upper_bound=1500,
                                                            operation_status={"code": 200, "description": "Normal"},
@@ -98,15 +98,15 @@ def check(nome, cond, detalhe=""):
 async def main():
     cliente("status")
     n = len(POSTS)
-    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, cliente="primos")
+    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, cliente="alfa")
     check("sem permissão de criar: recusa e nada enviado", out.startswith("ERRO") and "não permite criar" in out and len(POSTS) == n, out[:100])
 
     cliente("status,criar")
-    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, simular=True, cliente="primos")
+    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, simular=True, cliente="alfa")
     check("simulação: mostra contagens e descartes, nada enviado", "SIMULAÇÃO" in out and "9 linhas lidas, 7 utilizáveis" in out
           and "1 sem email/telefone" in out and "1 repetidas" in out and "3 lote(s)" in out and len(POSTS) == n, out.replace("\n", " | ")[:200])
 
-    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, descricao="base geral", cliente="primos")
+    out = await server.criar_publico_lista(nome="Todos os clientes", arquivo_csv=ARQ_SIMPLES, descricao="base geral", cliente="alfa")
     novos = POSTS[n:]
     check("cria o público de lista e envia 3 lotes (3+3+1)", [p.split("/")[-1] for p, _, _ in novos] == ["customaudiences", "users", "users", "users"]
           and [len(json.loads(f["payload"])["data"]) for p, f, _ in novos[1:]] == [3, 3, 1], str([p for p, _, _ in novos]))
@@ -123,38 +123,38 @@ async def main():
     check("resposta resume o envio", "OK público" in out and "7 linhas enviadas em 3 lote(s)" in out, out.splitlines()[-1][:140])
 
     n = len(POSTS)
-    out = await server.criar_publico_lista(nome="todos os CLIENTES", arquivo_csv=ARQ_SIMPLES, cliente="primos")
+    out = await server.criar_publico_lista(nome="todos os CLIENTES", arquivo_csv=ARQ_SIMPLES, cliente="alfa")
     check("nome repetido (sem diferenciar maiúsculas): recusa sem criar nem enviar", out.startswith("ERRO") and "Já existe um público" in out and len(POSTS) == n, out[:110])
 
     n = len(POSTS)
-    out = await server.criar_publico_lista(nome="Compradores Hilux", arquivo_csv=ARQ_VALOR, cliente="primos")
+    out = await server.criar_publico_lista(nome="Compradores Hilux", arquivo_csv=ARQ_VALOR, cliente="alfa")
     novos = POSTS[n:]
     pl = json.loads(novos[1][1]["payload"])
     check("coluna value: público baseado em valor e LOOKALIKE_VALUE no fim do schema", novos[0][1]["is_value_based"] == "true"
           and pl["schema"][-1] == "LOOKALIKE_VALUE" and pl["data"][0][-1] == "10.50" and pl["data"][3 - 3][-1] == "10.50")
     n = len(POSTS)
-    out = await server.criar_publico_lista(nome="Compradores Hilux sem valor", arquivo_csv=ARQ_VALOR, baseado_em_valor=False, cliente="primos")
+    out = await server.criar_publico_lista(nome="Compradores Hilux sem valor", arquivo_csv=ARQ_VALOR, baseado_em_valor=False, cliente="alfa")
     pl = json.loads(POSTS[n + 1][1]["payload"])
     check("baseado_em_valor=False ignora a coluna value", "is_value_based" not in POSTS[n][1] and "LOOKALIKE_VALUE" not in pl["schema"])
-    out = await server.criar_publico_lista(nome="x", arquivo_csv=ARQ_SIMPLES, baseado_em_valor=True, cliente="primos")
+    out = await server.criar_publico_lista(nome="x", arquivo_csv=ARQ_SIMPLES, baseado_em_valor=True, cliente="alfa")
     check("baseado_em_valor sem coluna value: recusa", out.startswith("ERRO") and "coluna value" in out)
 
     n = len(POSTS)
-    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=ARQ_CRU, cliente="primos")
+    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=ARQ_CRU, cliente="alfa")
     check("arquivo em texto puro (sem hash): recusado, nada sai do Mac", out.startswith("ERRO") and "SHA-256" in out and len(POSTS) == n, out[:120])
-    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=str(tmp / "nao_existe.csv"), cliente="primos")
+    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=str(tmp / "nao_existe.csv"), cliente="alfa")
     check("arquivo inexistente: erro claro", out.startswith("ERRO") and ".csv existente" in out)
-    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=csv_arquivo("sem_id.csv", ["fn", "ln"], [[h("a"), h("b")]]), cliente="primos")
+    out = await server.criar_publico_lista(nome="Cru", arquivo_csv=csv_arquivo("sem_id.csv", ["fn", "ln"], [[h("a"), h("b")]]), cliente="alfa")
     check("CSV sem email/phone/madid: explica", out.startswith("ERRO") and "email, phone ou madid" in out)
 
     n = len(POSTS); ESTADO["falha_lote"] = 2
-    out = await server.criar_publico_lista(nome="Falha no meio", arquivo_csv=ARQ_SIMPLES, cliente="primos")
+    out = await server.criar_publico_lista(nome="Falha no meio", arquivo_csv=ARQ_SIMPLES, cliente="alfa")
     ESTADO["falha_lote"] = 0
     novos = POSTS[n:]
     check("falha no lote 2: para, não repete e informa o que foi aceito", [s for _, _, s in novos] == ["ok", "ok", "500"]
           and "parou no lote 2 de 3" in out and "3 linhas" in out and "Não repeti nada" in out, out[:200])
 
-    out = await server.listar_publicos(cliente="primos")
+    out = await server.listar_publicos(cliente="alfa")
     check("listar_publicos: tamanho e status", "Compradores antigos" in out and "1000" in out and "Pronto" in out and not out.startswith("ERRO"), out.splitlines()[0][:100])
 
     tudo = "\n".join((tmp / "historico" / a).read_text() for a in os.listdir(tmp / "historico"))

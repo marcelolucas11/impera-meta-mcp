@@ -17,5 +17,13 @@ regex = '''(?i)META_APP_SECRET\s*=\s*['"]?[a-f0-9]{32}['"]?'''
 tags = ["meta", "secret"]
 
 [allowlist]
+# A pasta testes/ também é varrida: um token real colado num teste por engano tem de ser pego.
+# Só estes valores falsos (que nunca valeram nada na Meta) são aceitos.
 description = "Valores falsos usados só pelos testes (a API da Meta é simulada)"
-paths = ['''testes/.*''']
+regexTarget = "secret"
+regexes = [
+  '''^EAAFAKE[A-Z0-9]*$''',
+  '''^TOKEN_[A-Z0-9_]+[a-z0-9]*$''',
+  '''^TOK[A-Z]+$''',
+  '''^appsecret_fake_[a-z]+$''',
+]

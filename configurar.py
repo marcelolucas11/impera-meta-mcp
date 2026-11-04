@@ -236,7 +236,7 @@ def main(argv: Optional[list] = None) -> None:
     raiz = ler_env(ENV).get("META_ACCESS_TOKEN", "")
     if raiz and raiz != PLACEHOLDER:
         print("Encontrei o token da instalação anterior (um cliente só).")
-        digitado = perguntar("Nome do cliente desse token (ex.: primos): ")
+        digitado = perguntar("Nome do cliente desse token (ex.: alfa): ")
         nome = slug(digitado)
         if nome and nome != "padrao" and migrar_instalacao_antiga(nome, digitado):
             print(f"Movido para o cliente '{nome}'.\n")

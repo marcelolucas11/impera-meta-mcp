@@ -45,9 +45,9 @@ def handler(req: httpx.Request) -> httpx.Response:
     if p == f"act_{ACC}":
         return httpx.Response(200, json={"account_id": ACC, "name": "CA 01", "currency": "BRL"})
     if p.endswith("/promote_pages"):
-        return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Sorteio dos Primos"}]})
+        return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Rifa Exemplo"}]})
     if p == "888000000000001":
-        return httpx.Response(200, json={"id": p, "name": "Sorteio dos Primos", "access_token": PTOKEN})
+        return httpx.Response(200, json={"id": p, "name": "Rifa Exemplo", "access_token": PTOKEN})
     if p == "888000000000001/leadgen_forms":
         assert auth == f"Bearer {PTOKEN}", "formulários exigem o token da página"
         return httpx.Response(200, json={"data": [{"id": "600100001", "name": "Existente", "status": "ACTIVE", "leads_count": 3, "created_time": "2026-10-01T00:00:00+0000",

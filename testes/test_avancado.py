@@ -68,11 +68,11 @@ def handler(req: httpx.Request) -> httpx.Response:
     q = parse_qs(urlparse(str(req.url)).query)
     if req.method == "GET":
         if p == f"act_{ACC}":
-            return httpx.Response(200, json={"account_id": ACC, "name": "CA 01 PRIMOS", "currency": "BRL"})
+            return httpx.Response(200, json={"account_id": ACC, "name": "CA 01 ALFA", "currency": "BRL"})
         if p.endswith("/adspixels"):
-            return httpx.Response(200, json={"data": [{"id": "777000000000001", "name": "Pixel Primos"}]})
+            return httpx.Response(200, json={"data": [{"id": "777000000000001", "name": "Pixel Alfa"}]})
         if p.endswith("/promote_pages"):
-            return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Sorteio dos Primos"}]})
+            return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Rifa Exemplo"}]})
         if p.endswith("/customaudiences"):
             return httpx.Response(200, json={"data": [{"id": k, "name": v["name"]} for k, v in AUD.items()]})
         if p.endswith("/delivery_estimate"):

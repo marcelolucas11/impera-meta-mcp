@@ -27,6 +27,9 @@ História, decisões, estado atual e pendências: `docs/CONTEXTO.md`.
 - Token só no cabeçalho `Authorization`, nunca em URL, log, resposta de ferramenta ou na janela do app. Nunca pedir token no chat.
 - Um token por cliente (`clientes/<id>.env`, permissão 600). Com mais de um cliente, `cliente` é obrigatório: nunca escolher por omissão.
 - Nenhum token, `.env`, `clientes/` ou `relatorios/` no repositório.
+- O repositório é público: nada de nome real de cliente, ID real de conta, página, pixel ou BM, nem em testes, exemplos ou `docs/`. Nos testes, usar clientes fictícios (`alfa`, `betaco`) e IDs falsos. Esses detalhes ficam no projeto privado do Claude.
+- Segredo falso em teste só com os formatos aceitos por `testes/test_segredos.py` e pelo `.gitleaks.toml` (ex.: `EAAFAKE…`, `TOKEN_…`). A pasta `testes/` é varrida como o resto.
+- Commits nunca com e-mail pessoal: usar o e-mail `noreply` (do GitHub ou o do Claude).
 - O nome do servidor no Claude Desktop é `meta-ads` e a pasta instalada é `~/meta-ads-mcp`. Mudar qualquer um quebra instalações e instruções de projeto já existentes.
 - Alcance e frequência são deduplicados: nunca somar entre linhas.
 

@@ -62,7 +62,7 @@ def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"id": "5001", "name": "criativo 1", "status": "ACTIVE", "object_type": "SHARE", "title": "Concorra",
                                                   "body": "Ganhe um carro", "call_to_action_type": "SHOP_NOW", "thumbnail_url": "https://t/1.jpg"}]})
     if p.endswith("/instagram_accounts"):
-        return httpx.Response(200, json={"data": [{"id": "17841400000000001", "username": "primos"}]})
+        return httpx.Response(200, json={"data": [{"id": "17841400000000001", "username": "alfa"}]})
     if p == "17841400000000001/media":
         return httpx.Response(200, json={"data": [{"id": "179001", "caption": "Sorteio\nde hoje", "media_type": "VIDEO", "permalink": "https://ig/p/1",
                                                   "timestamp": "2026-10-21T10:00:00+0000", "like_count": 120, "comments_count": 9}]})
@@ -124,7 +124,7 @@ async def main():
     out = await server.listar_criativos(cliente="c")
     check("criativos listados", "criativo 1" in out and "SHOP_NOW" in out and "Ganhe um carro" in out)
     out = await server.listar_instagram(cliente="c")
-    check("perfis do Instagram", "17841400000000001" in out and "primos" in out)
+    check("perfis do Instagram", "17841400000000001" in out and "alfa" in out)
     out = await server.listar_instagram(instagram_id="17841400000000001", cliente="c")
     check("posts do Instagram (legenda numa linha só)", "179001" in out and "Sorteio de hoje" in out and "120" in out)
     out = await server.listar_instagram(instagram_id="17841499999999999", cliente="c")

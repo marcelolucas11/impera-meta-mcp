@@ -18,7 +18,7 @@ tmp = Path(tempfile.mkdtemp())
 server.BASE_DIR, server.ENV_FILE, server.CLIENTES_DIR, server.HISTORICO_DIR = tmp, tmp / ".env", tmp / "clientes", tmp / "historico"
 server._BACKOFF = (0, 0, 0)
 (tmp / "clientes").mkdir()
-TOK = {"primos": "TOKEN_ESCRITA_PRIMOS_aa11", "dona": "TOKEN_ESCRITA_DONA_bb22"}
+TOK = {"alfa": "TOKEN_ESCRITA_ALFA_aa11", "beta": "TOKEN_ESCRITA_BETA_bb22"}
 
 
 def cliente(nome, permissoes="", teto="", conta="111111111111111"):
@@ -26,8 +26,8 @@ def cliente(nome, permissoes="", teto="", conta="111111111111111"):
         f"NOME={nome}\nMETA_ACCESS_TOKEN={TOK[nome]}\nMETA_AD_ACCOUNT_ID={conta}\nPERMISSOES={permissoes}\nORCAMENTO_MAX_DIA={teto}\n")
 
 
-cliente("primos")
-cliente("dona", "status,orcamento,editar,criar", conta="222222222222222")
+cliente("alfa")
+cliente("beta", "status,orcamento,editar,criar", conta="222222222222222")
 
 OBJ = {  # objetos na Meta simulada
     "120000000000000001": {"name": "[VENDAS] cpa_600 aberto", "account_id": "111111111111111", "type": "campaign", "objective": "OUTCOME_SALES",
@@ -75,11 +75,11 @@ def handler(req: httpx.Request) -> httpx.Response:
     q = parse_qs(urlparse(str(req.url)).query)
     if req.method == "GET":
         if p in ("act_111111111111111", "act_222222222222222"):
-            return httpx.Response(200, json={"account_id": p[4:], "name": "CA 01 PRIMOS" if "111" in p else "DONA CA 02", "currency": "BRL"})
+            return httpx.Response(200, json={"account_id": p[4:], "name": "CA 01 ALFA" if "111" in p else "BETA CA 02", "currency": "BRL"})
         if p.endswith("/adspixels"):
-            return httpx.Response(200, json={"data": [{"id": "777000000000001", "name": "Pixel Primos", "last_fired_time": "2026-10-15T10:00:00+0000"}]})
+            return httpx.Response(200, json={"data": [{"id": "777000000000001", "name": "Pixel Alfa", "last_fired_time": "2026-10-15T10:00:00+0000"}]})
         if p.endswith("/promote_pages"):
-            return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Sorteio dos Primos", "instagram_business_account": {"id": "17841400000000001", "username": "sorteiodosprimos"}}]})
+            return httpx.Response(200, json={"data": [{"id": "888000000000001", "name": "Rifa Exemplo", "instagram_business_account": {"id": "17841400000000001", "username": "rifaexemplo"}}]})
         if p.endswith("/adimages"):
             return httpx.Response(200, json={"data": [{"hash": "abc123hash", "name": "carro.jpg", "width": 1080, "height": 1080, "created_time": "2026-10-01T00:00:00+0000"}]})
         if p.endswith("/insights"):
@@ -161,67 +161,67 @@ def hist(nome):
 
 async def main():
     n = len(POSTS)
-    out = await server.alterar_status(ids=["120000000000000001"], acao="pausar", cliente="primos")
+    out = await server.alterar_status(ids=["120000000000000001"], acao="pausar", cliente="alfa")
     check("sem permissão: recusa e explica onde liberar", out.startswith("ERRO") and "não permite ativar e pausar" in out and "O que o Claude pode fazer" in out, out[:110])
     check("sem permissão: nada enviado à Meta", posts_desde(n) == [])
 
-    cliente("primos", "status,orcamento,editar,criar", teto="500")
+    cliente("alfa", "status,orcamento,editar,criar", teto="500")
     n = len(POSTS)
-    out = await server.alterar_status(ids=["120000000000000001", "120000000000000021"], acao="ativar", cliente="primos")
+    out = await server.alterar_status(ids=["120000000000000001", "120000000000000021"], acao="ativar", cliente="alfa")
     enviados = posts_desde(n)
     check("ativar: um POST por objeto com status=ACTIVE", [(p, f.get("status")) for p, f, _ in enviados] ==
           [("120000000000000001", "ACTIVE"), ("120000000000000021", "ACTIVE")], out.replace("\n", " | ")[:160])
-    check("ativar: histórico gravado por cliente, permissão 600", len(hist("primos")) == 2 and all(h["ok"] for h in hist("primos"))
-          and oct((tmp / "historico/primos.jsonl").stat().st_mode & 0o777) == "0o600")
+    check("ativar: histórico gravado por cliente, permissão 600", len(hist("alfa")) == 2 and all(h["ok"] for h in hist("alfa"))
+          and oct((tmp / "historico/alfa.jsonl").stat().st_mode & 0o777) == "0o600")
 
     n = len(POSTS)
-    out = await server.alterar_status(ids=["130000000000000001"], acao="pausar", cliente="primos")
+    out = await server.alterar_status(ids=["130000000000000001"], acao="pausar", cliente="alfa")
     check("objeto de outra conta: recusado sem enviar nada", "ERRO" in out and "não da conta padrão" in out and posts_desde(n) == [], out[:120])
 
     n = len(POSTS)
-    out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=600, cliente="primos")
+    out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=600, cliente="alfa")
     check("teto: R$ 600 com teto de R$ 500 recusado", out.startswith("ERRO") and "passa do teto" in out and posts_desde(n) == [], out[:100])
-    out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=350.5, cliente="primos")
+    out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=350.5, cliente="alfa")
     p, f, _ = POSTS[-1]
     check("orçamento: R$ 350,50 vira 35050 centavos", p == "120000000000000001" and f == {"daily_budget": "35050"} and "500.00 -> 350.50" in out, out.splitlines()[-1][:120])
-    out = await server.alterar_orcamento(id="120000000000000001", limite_cpa=6, cliente="primos")
+    out = await server.alterar_orcamento(id="120000000000000001", limite_cpa=6, cliente="alfa")
     check("limite de CPA em campanha: recusado", out.startswith("ERRO") and "conjunto" in out)
-    await server.alterar_orcamento(id="120000000000000011", limite_cpa=6.5, roas_minimo=2.2, cliente="primos")
+    await server.alterar_orcamento(id="120000000000000011", limite_cpa=6.5, roas_minimo=2.2, cliente="alfa")
     p, f, _ = POSTS[-1]
     check("limite de CPA e ROAS mínimo no conjunto", f.get("bid_amount") == "650" and json.loads(f["bid_constraints"]) == {"roas_average_floor": 22000})
     check("moeda sem centavos (CLP) não multiplica por 100", server._centavos(15000, "CLP") == 15000 and server._centavos(15, "BRL") == 1500)
 
-    await server.renomear(id="120000000000000021", nome="video_carro_01 - vencedor", cliente="primos")
+    await server.renomear(id="120000000000000021", nome="video_carro_01 - vencedor", cliente="alfa")
     check("renomear", POSTS[-1][:2] == ("120000000000000021", {"name": "video_carro_01 - vencedor"}))
 
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000011", novo_nome="aberto 18-65 teste", quantidade=2, cliente="primos")
+    out = await server.duplicar(id="120000000000000011", novo_nome="aberto 18-65 teste", quantidade=2, cliente="alfa")
     enviados = posts_desde(n)
     copias = [f for p, f, _ in enviados if p.endswith("/copies")]
     nomes = [f["name"] for p, f, _ in enviados if not p.endswith("/copies")]
     check("duplicar: cópias PAUSADAS e com anúncios (deep_copy)", len(copias) == 2 and all(c["status_option"] == "PAUSED" and c["deep_copy"] == "true" for c in copias))
     check("duplicar: renomeia as cópias", nomes == ["aberto 18-65 teste 1", "aberto 18-65 teste 2"], str(nomes))
-    out = await server.duplicar(id="120000000000000021", cliente="primos")
+    out = await server.duplicar(id="120000000000000021", cliente="alfa")
     check("duplicar anúncio: sem deep_copy", "deep_copy" not in POSTS[-1][1] and POSTS[-1][1]["status_option"] == "PAUSED")
 
-    out = await server.criar_campanha(nome="[VENDAS] nova", orcamento_diario=200, estrategia_lance="limite_custo", cliente="primos")
+    out = await server.criar_campanha(nome="[VENDAS] nova", orcamento_diario=200, estrategia_lance="limite_custo", cliente="alfa")
     p, f, _ = POSTS[-1]
     check("criar campanha CBO: PAUSADA, orçamento e estratégia", p == "act_111111111111111/campaigns" and f["status"] == "PAUSED"
           and f["daily_budget"] == "20000" and f["bid_strategy"] == "COST_CAP" and f["special_ad_categories"] == "[]", out.splitlines()[-1][:90])
-    await server.criar_campanha(nome="[VENDAS] sem cbo", cliente="primos")
+    await server.criar_campanha(nome="[VENDAS] sem cbo", cliente="alfa")
     f = POSTS[-1][1]
     check("criar campanha sem orçamento: avisa a Meta que o orçamento fica nos conjuntos", f.get("is_adset_budget_sharing_enabled") == "false" and "daily_budget" not in f)
-    out = await server.criar_campanha(nome="cara", orcamento_diario=900, cliente="primos")
+    out = await server.criar_campanha(nome="cara", orcamento_diario=900, cliente="alfa")
     check("criar campanha acima do teto: recusada", out.startswith("ERRO") and "teto" in out)
 
-    out = await server.criar_conjunto(campanha_id="120000000000000002", nome="FSA 25-55", cliente="primos")
+    out = await server.criar_conjunto(campanha_id="120000000000000002", nome="FSA 25-55", cliente="alfa")
     check("conjunto em campanha sem orçamento exige orçamento do conjunto", out.startswith("ERRO") and "orcamento_diario" in out)
     out = await server.criar_conjunto(campanha_id="120000000000000002", nome="FSA 25-55", orcamento_diario=100, estrategia_lance="limite_custo",
-                                      cidades=["260131"], raio_km=25, idade_min=25, idade_max=55, genero="homens", publico_advantage=False, cliente="primos")
+                                      cidades=["260131"], raio_km=25, idade_min=25, idade_max=55, genero="homens", publico_advantage=False, cliente="alfa")
     check("estratégia de limite de custo exige limite_cpa", out.startswith("ERRO") and "limite_cpa" in out)
     out = await server.criar_conjunto(campanha_id="120000000000000002", nome="FSA 25-55", orcamento_diario=100, estrategia_lance="limite_custo",
                                       limite_cpa=6, cidades=["260131"], raio_km=25, idade_min=25, idade_max=55, genero="homens",
-                                      publico_advantage=False, cliente="primos")
+                                      publico_advantage=False, cliente="alfa")
     p, f, _ = POSTS[-1]
     alvo = json.loads(f["targeting"])
     check("criar conjunto: PAUSADO, conversão no pixel único da conta", p == "act_111111111111111/adsets" and f["status"] == "PAUSED"
@@ -231,13 +231,13 @@ async def main():
     check("criar conjunto: segmentação (cidade com raio, idade, gênero, Advantage desligado)",
           alvo["geo_locations"] == {"location_types": ["home", "recent"], "cities": [{"key": "260131", "radius": 25, "distance_unit": "kilometer"}]}
           and alvo["age_min"] == 25 and alvo["age_max"] == 55 and alvo["genders"] == [1] and alvo["targeting_automation"] == {"advantage_audience": 0}, json.dumps(alvo)[:140])
-    out = await server.criar_conjunto(campanha_id="120000000000000001", nome="x", orcamento_diario=50, cliente="primos")
+    out = await server.criar_conjunto(campanha_id="120000000000000001", nome="x", orcamento_diario=50, cliente="alfa")
     check("conjunto em campanha CBO não aceita orçamento próprio", out.startswith("ERRO") and "CBO" in out)
 
     n = len(POSTS)
     out = await server.criar_anuncio(conjunto_id="120000000000000011", nome="carro 01", pagina_id="888000000000001", instagram_id="17841400000000001",
-                                     link="https://sorteiodosprimos.com.br", texto="Concorra a um carro!", titulo="Sorteio dos Primos",
-                                     imagem_url="https://imagens.exemplo/carro.png", cta="SHOP_NOW", parametros_url="utm_source=meta", cliente="primos")
+                                     link="https://rifaexemplo.com.br", texto="Concorra a um carro!", titulo="Rifa Exemplo",
+                                     imagem_url="https://imagens.exemplo/carro.png", cta="SHOP_NOW", parametros_url="utm_source=meta", cliente="alfa")
     caminhos = [p for p, _, _ in posts_desde(n)]
     check("criar anúncio: sobe a imagem, cria o criativo e o anúncio", caminhos == ["act_111111111111111/adimages", "act_111111111111111/adcreatives", "act_111111111111111/ads"], str(caminhos))
     img, cri, ad = [f for _, f, _ in posts_desde(n)]
@@ -248,82 +248,82 @@ async def main():
     check("anúncio PAUSADO usando o criativo novo", ad["status"] == "PAUSED" and json.loads(ad["creative"])["creative_id"].startswith("120000"))
     check("download da imagem não leva o token", AUTH_IMAGEM == [None], str(AUTH_IMAGEM))
     out = await server.criar_anuncio(conjunto_id="120000000000000011", nome="video", pagina_id="888000000000001", link="https://x.com",
-                                     texto="t", video_id="555000000000001", cliente="primos")
+                                     texto="t", video_id="555000000000001", cliente="alfa")
     spec = json.loads(POSTS[-2][1]["object_story_spec"])
     check("anúncio de vídeo usa a miniatura do vídeo", spec["video_data"]["image_url"] == "https://scontent.exemplo/thumb.jpg")
-    out = await server.criar_anuncio(conjunto_id="120000000000000011", nome="sem midia", pagina_id="1", link="https://x", texto="t", cliente="primos")
+    out = await server.criar_anuncio(conjunto_id="120000000000000011", nome="sem midia", pagina_id="1", link="https://x", texto="t", cliente="alfa")
     check("anúncio sem mídia: explica o que falta", out.startswith("ERRO") and "exatamente uma mídia" in out)
 
     # Segurança das repetições
     ESTADO["limite"] = 1; n = len(POSTS)
-    out = await server.renomear(id="120000000000000021", nome="r1", cliente="primos")
+    out = await server.renomear(id="120000000000000021", nome="r1", cliente="alfa")
     check("limite de chamadas: não insiste (insistir gera sinal de abuso) e diz que nada foi alterado", [s for _, _, s in posts_desde(n)] == ["limite"] and "Nada foi alterado" in out and "Não vou insistir" in out, out[:160])
-    await server.renomear(id="120000000000000021", nome="r1", cliente="primos")
+    await server.renomear(id="120000000000000021", nome="r1", cliente="alfa")
     ESTADO["falha_500"] = True; n = len(POSTS)
-    out = await server.criar_campanha(nome="dupla?", cliente="primos")
+    out = await server.criar_campanha(nome="dupla?", cliente="alfa")
     check("falha 500 na criação: não repete e avisa que pode ter sido aplicada", [s for _, _, s in posts_desde(n)] == ["500"] and "PODE ter sido aplicada" in out)
     ESTADO["timeout"] = True; n = len(POSTS)
-    out = await server.criar_campanha(nome="dupla?", cliente="primos")
+    out = await server.criar_campanha(nome="dupla?", cliente="alfa")
     check("conexão caiu no envio: não repete e avisa", [s for _, _, s in posts_desde(n)] == ["timeout"] and "PODE ter sido aplicada" in out)
 
     # Isolamento entre clientes e leituras de apoio
-    cliente("primos", "")
-    out = await server.criar_campanha(nome="x", cliente="primos")
+    cliente("alfa", "")
+    out = await server.criar_campanha(nome="x", cliente="alfa")
     check("permissão desligada de novo: recusa na hora, sem reiniciar nada", out.startswith("ERRO") and "não permite criar" in out)
-    out = await server.alterar_status(ids=["120000000000000001"], acao="pausar", cliente="dona")
+    out = await server.alterar_status(ids=["120000000000000001"], acao="pausar", cliente="beta")
     check("permissão de um cliente não vale para a conta de outro", "não da conta padrão" in out)
-    for nome, coro, esperado in (("pixels", server.listar_pixels(cliente="primos"), "Pixel Primos"),
-                                 ("páginas", server.listar_paginas(cliente="primos"), "sorteiodosprimos"),
-                                 ("mídias", server.listar_midias(cliente="primos"), "abc123hash"),
-                                 ("localização", server.buscar_localizacao(termo="Feira de Santana", cliente="primos"), "260131")):
+    for nome, coro, esperado in (("pixels", server.listar_pixels(cliente="alfa"), "Pixel Alfa"),
+                                 ("páginas", server.listar_paginas(cliente="alfa"), "rifaexemplo"),
+                                 ("mídias", server.listar_midias(cliente="alfa"), "abc123hash"),
+                                 ("localização", server.buscar_localizacao(termo="Feira de Santana", cliente="alfa"), "260131")):
         r = await coro
         check(f"leitura de apoio: {nome}", esperado in r and not r.startswith("ERRO"), r.splitlines()[0][:80])
     out = await server.listar_clientes()
-    check("listar_clientes mostra as permissões", "dona,dona,222222222222222,222222222222222,auto,ler+status+orcamento+editar+criar" in out, out.splitlines()[2][:100])
+    check("listar_clientes mostra as permissões", "beta,beta,222222222222222,222222222222222,auto,ler+status+orcamento+editar+criar" in out, out.splitlines()[2][:100])
 
     # A Meta real pode não mandar metadata.type (ou mandar nomes antigos): o tipo tem que ser descoberto mesmo assim
-    cliente("primos", "status,orcamento,editar,criar", teto="5000")
+    cliente("alfa", "status,orcamento,editar,criar", teto="5000")
     for modo in ("sem", "legado"):
         ESTADO["metadata"] = modo
         n = len(POSTS)
-        out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=500, cliente="primos")
+        out = await server.alterar_orcamento(id="120000000000000001", orcamento_diario=500, cliente="alfa")
         check(f"metadata {modo}: orçamento de campanha", out.startswith("Cliente") and posts_desde(n)[-1][:2] == ("120000000000000001", {"daily_budget": "50000"}), out[:120])
         n = len(POSTS)
-        out = await server.alterar_orcamento(id="120000000000000011", orcamento_diario=130, cliente="primos")
+        out = await server.alterar_orcamento(id="120000000000000011", orcamento_diario=130, cliente="alfa")
         check(f"metadata {modo}: orçamento de conjunto", "OK conjunto" in out and posts_desde(n)[-1][0] == "120000000000000011", out[:120])
-        out = await server.alterar_orcamento(id="120000000000000021", orcamento_diario=50, cliente="primos")
+        out = await server.alterar_orcamento(id="120000000000000021", orcamento_diario=50, cliente="alfa")
         check(f"metadata {modo}: anúncio continua recusado no orçamento", out.startswith("ERRO") and "anúncio" in out, out[:120])
         n = len(POSTS)
-        out = await server.duplicar(id="120000000000000001", cliente="primos")
+        out = await server.duplicar(id="120000000000000001", cliente="alfa")
         check(f"metadata {modo}: duplica campanha com deep_copy e PAUSADA", posts_desde(n) and posts_desde(n)[0][0] == "120000000000000001/copies"
               and posts_desde(n)[0][1].get("deep_copy") == "true" and posts_desde(n)[0][1]["status_option"] == "PAUSED", out[:120])
         n = len(POSTS)
-        out = await server.duplicar(id="120000000000000021", cliente="primos")
+        out = await server.duplicar(id="120000000000000021", cliente="alfa")
         check(f"metadata {modo}: duplica anúncio sem deep_copy", posts_desde(n) and "deep_copy" not in posts_desde(n)[0][1], out[:120])
     ESTADO["metadata"] = "normal"
 
     # Chave "Exigir período"
-    cliente("primos", "status,orcamento,editar,criar", teto="1000")
-    with open(tmp / "clientes/primos.env", "a") as f:
+    cliente("alfa", "status,orcamento,editar,criar", teto="1000")
+    with open(tmp / "clientes/alfa.env", "a") as f:
         f.write("EXIGIR_PERIODO=1\n")
     antes = sum("/insights" in u for u in URLS)
-    out = await server.consultar_insights(cliente="primos")
+    out = await server.consultar_insights(cliente="alfa")
     check("exigir período: consulta sem datas recusada e nada consultado", out.startswith("ERRO") and "exige período" in out
           and "pergunte" in out and sum("/insights" in u for u in URLS) == antes, out[:120])
-    out = await server.consultar_insights(cliente="primos", desde="2026-10-13")
+    out = await server.consultar_insights(cliente="alfa", desde="2026-10-13")
     check("exigir período: só a data inicial não basta", out.startswith("ERRO") and "exige período" in out)
-    out = await server.exportar_relatorio(cliente="primos")
+    out = await server.exportar_relatorio(cliente="alfa")
     check("exigir período: relatório sem datas recusado", out.startswith("ERRO") and "exige período" in out)
-    out = await server.consultar_insights(cliente="primos", desde="2026-10-13", ate="2026-10-19")
+    out = await server.consultar_insights(cliente="alfa", desde="2026-10-13", ate="2026-10-19")
     check("exigir período: com datas, consulta normal", not out.startswith("ERRO") and "2026-10-13 a 2026-10-19" in out, out[:120])
     out = await server.listar_clientes()
     check("listar_clientes mostra se exige período", ",sim," in out.splitlines()[2], out.splitlines()[2][:120])
-    out = await server.estrutura_conta(cliente="primos", nivel="campanhas")
+    out = await server.estrutura_conta(cliente="alfa", nivel="campanhas")
     check("estrutura sem período continua liberada para achar IDs", not out.startswith("ERRO") and "Só itens ativos" in out)
 
     # Estrutura filtrada pelo que veiculou no período
     FILTROS.clear()
-    out = await server.estrutura_conta(cliente="primos", nivel="campanhas", desde="2026-10-13", ate="2026-10-19")
+    out = await server.estrutura_conta(cliente="alfa", nivel="campanhas", desde="2026-10-13", ate="2026-10-19")
     dados = json.loads(out.split("## campanhas: ")[1].split("\n", 1)[1].splitlines()[0])
     check("período: só o que veiculou, pausado incluído, ordenado por gasto",
           [(d["campanha_id"], d["gasto_periodo"], d["status"]) for d in dados] ==
@@ -332,22 +332,22 @@ async def main():
     check("período: avisa o que veiculou mas não existe mais", "1 que veicularam no período já não aparecem" in out)
     check("período: busca na Meta só os IDs que veicularam", FILTROS and FILTROS[0][0] == "campaigns"
           and sorted(FILTROS[0][1][0]["value"]) == ["120000000000000001", "120000000000000002", "120000000000000099"], str(FILTROS)[:120])
-    out = await server.estrutura_conta(cliente="primos", nivel="tudo", desde="2026-10-13", ate="2026-10-19")
+    out = await server.estrutura_conta(cliente="alfa", nivel="tudo", desde="2026-10-13", ate="2026-10-19")
     check("período, nível tudo: campanha, conjunto e anúncio do que veiculou",
           "## campanhas: 1" in out and "## conjuntos: 1" in out and "## anuncios: 1" in out and "120000000000000021" in out
           and "[VENDAS] cpa_600" not in out, out.replace("\n", " | ")[:160])
-    out = await server.estrutura_conta(cliente="primos", nivel="campanhas", somente_ativos=False)
+    out = await server.estrutura_conta(cliente="alfa", nivel="campanhas", somente_ativos=False)
     check("sem período: lista pelo status, como antes", "cpa_teste_7" in out and "gasto_periodo" not in out)
 
     # Duplicar com orçamento da cópia
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000003", cliente="primos")
+    out = await server.duplicar(id="120000000000000003", cliente="alfa")
     check("duplicar cpa_teste_7 (R$ 6.000) sem orçamento: teto recusa sem criar", out.startswith("ERRO") and "passa do teto" in out and posts_desde(n) == [], out[:100])
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000003", orcamento_diario=1500, cliente="primos")
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=1500, cliente="alfa")
     check("duplicar com orçamento acima do teto: recusa sem criar", out.startswith("ERRO") and "passa do teto" in out and posts_desde(n) == [])
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000003", novo_nome="cpa_teste_7_b", quantidade=2, orcamento_diario=300, cliente="primos")
+    out = await server.duplicar(id="120000000000000003", novo_nome="cpa_teste_7_b", quantidade=2, orcamento_diario=300, cliente="alfa")
     env = [(p.split("/")[-1], sorted(f)) for p, f, _ in posts_desde(n)]
     orcs = [f["daily_budget"] for p, f, _ in posts_desde(n) if "daily_budget" in f]
     check("duplicar com orçamento: cópia, nome e orçamento de cada uma",
@@ -355,21 +355,21 @@ async def main():
           and all(f["status_option"] == "PAUSED" for p, f, _ in posts_desde(n) if p.endswith("/copies")), str(env)[:160])
     check("duplicar com orçamento: resposta mostra o orçamento novo", out.count("OK ") == 2 and "orçamento diário BRL 300.00" in out, out[:160])
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000002", orcamento_diario=100, cliente="primos")
+    out = await server.duplicar(id="120000000000000002", orcamento_diario=100, cliente="alfa")
     check("campanha com orçamento nos conjuntos: orcamento_diario recusado sem criar", out.startswith("ERRO") and "orçamentos ficam nos conjuntos" in out and posts_desde(n) == [])
-    out = await server.duplicar(id="120000000000000021", orcamento_diario=50, cliente="primos")
+    out = await server.duplicar(id="120000000000000021", orcamento_diario=50, cliente="alfa")
     check("anúncio com orcamento_diario: recusado", out.startswith("ERRO") and "Anúncio não tem orçamento" in out)
-    cliente("primos", "status,orcamento,editar,criar", teto="150")
+    cliente("alfa", "status,orcamento,editar,criar", teto="150")
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000002", cliente="primos")
+    out = await server.duplicar(id="120000000000000002", cliente="alfa")
     check("teto vale para os conjuntos de campanha sem orçamento de campanha", out.startswith("ERRO") and "200.00" in out and posts_desde(n) == [], out[:120])
-    cliente("primos", "status,criar", teto="1000")
-    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="primos")
+    cliente("alfa", "status,criar", teto="1000")
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="alfa")
     check("orçamento na cópia exige a permissão de orçamentos", out.startswith("ERRO") and "orçamentos e lances" in out)
-    cliente("primos", "status,orcamento,editar,criar", teto="1000")
+    cliente("alfa", "status,orcamento,editar,criar", teto="1000")
     ESTADO["falha_orcamento"] = True
     n = len(POSTS)
-    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="primos")
+    out = await server.duplicar(id="120000000000000003", orcamento_diario=300, cliente="alfa")
     ESTADO["falha_orcamento"] = False
     check("orçamento recusado depois da cópia: avisa, não repete e manda ajustar antes de ativar",
           "PARCIAL" in out and "NÃO foi trocado" in out and "6,000.00" in out and "Antes de ativar" in out
@@ -377,7 +377,7 @@ async def main():
 
     tudo = "\n".join((tmp / "historico" / a).read_text() for a in os.listdir(tmp / "historico"))
     check("histórico sem token e sem bytes de imagem", not any(t in tudo for t in TOK.values()) and "bytes" not in tudo)
-    check("histórico registra as falhas também", any(not h["ok"] for h in hist("primos")))
+    check("histórico registra as falhas também", any(not h["ok"] for h in hist("alfa")))
     check("token nunca em URL", not any(t in u for u in URLS for t in TOK.values()))
 
 asyncio.run(main())

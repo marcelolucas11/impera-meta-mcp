@@ -6,8 +6,8 @@ import httpx
 
 HOJE = date.today(); D1 = HOJE - timedelta(days=45)
 CONTAS = {
-    "TOKPRIMOS": ("relatorios-primos", [("111111111111111", "PRIMOS BM01 CA 01", 1)]),
-    "TOKDONA": ("sysuser-donaco", [("687018494504975", "DONA CO BM01 CA 02", 1), ("113392661530740", "DONA CO BM01 CA 03", 3)]),
+    "TOKALFA": ("relatorios-alfa", [("111111111111111", "ALFA BM01 CA 01", 1)]),
+    "TOKBETA": ("sysuser-betaco", [("520000000000002", "BETA CO BM01 CA 02", 1), ("520000000000003", "BETA CO BM01 CA 03", 3)]),
 }
 random.seed(11)
 FACTS = {}

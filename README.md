@@ -65,9 +65,9 @@ Instalar por cima com o botão de download ou com a linha do Terminal também pr
 
 Na ficha de cada cliente, copie a instrução de "No projeto do Claude" e cole nas instruções do projeto dele. Exemplo:
 
-> Neste projeto o cliente do Impera Meta MCP é `primos`. Passe `cliente="primos"` em toda chamada do servidor meta-ads e nunca consulte outro cliente aqui.
+> Neste projeto o cliente do Impera Meta MCP é `alfa`. Passe `cliente="alfa"` em toda chamada do servidor meta-ads e nunca consulte outro cliente aqui.
 
-Assim, "exporta o relatório dos últimos 7 dias" dentro do projeto PRIMOS puxa só os Primos.
+Assim, "exporta o relatório dos últimos 7 dias" dentro do projeto ALFA puxa só os Alfa.
 
 ## Como os clientes ficam separados
 

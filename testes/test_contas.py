@@ -22,9 +22,9 @@ server.BASE_DIR, server.ENV_FILE, server.CLIENTES_DIR, server.HISTORICO_DIR = tm
 configurar.BASE, configurar.ENV, configurar.CLIENTES = tmp, tmp / ".env", tmp / "clientes"
 server._BACKOFF = (0, 0, 0)
 (tmp / "clientes").mkdir()
-TOKEN = "TOKEN_CONTAS_PRIMOS_zz99"
+TOKEN = "TOKEN_CONTAS_ALFA_zz99"
 CA1, CA2, CA3 = "111111111111111", "222222222222222", "333333333333333"
-NOMES = {CA1: "CA 01 PRIMOS", CA2: "CA 02 PRIMOS", CA3: "CA 03 PRIMOS"}
+NOMES = {CA1: "CA 01 ALFA", CA2: "CA 02 ALFA", CA3: "CA 03 ALFA"}
 OBJ = {
     "120000000000000001": {"name": "camp da CA 01", "account_id": CA1, "type": "campaign", "effective_status": "ACTIVE"},
     "120000000000000002": {"name": "camp da CA 02", "account_id": CA2, "type": "campaign", "effective_status": "ACTIVE"},
@@ -71,8 +71,8 @@ def check(nome, cond, detalhe=""):
 
 
 def cliente(extras=""):
-    (tmp / "clientes/primos.env").write_text(
-        f"NOME=Primos\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID={CA1}\nPERMISSOES=status,orcamento,editar,criar\nCONTAS_LIBERADAS={extras}\n")
+    (tmp / "clientes/alfa.env").write_text(
+        f"NOME=Alfa\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID={CA1}\nPERMISSOES=status,orcamento,editar,criar\nCONTAS_LIBERADAS={extras}\n")
 
 
 async def main():
@@ -81,60 +81,60 @@ async def main():
     check("listar_clientes mostra a coluna contas_liberadas, com a padrão", "contas_liberadas" in out and CA1 in out)
 
     n = len(POSTS)
-    out = await server.criar_campanha(nome="camp nova", cliente="primos")
+    out = await server.criar_campanha(nome="camp nova", cliente="alfa")
     check("sem 'conta': cria na conta padrão", POSTS[n][0] == f"act_{CA1}/campaigns" and "PAUSADA" in out, out[:120])
 
     n = len(POSTS)
-    out = await server.criar_campanha(nome="camp na 02", conta=CA2, cliente="primos")
+    out = await server.criar_campanha(nome="camp na 02", conta=CA2, cliente="alfa")
     check("conta não liberada: recusa, explica e não envia nada",
           out.startswith("ERRO") and "não está liberada" in out and CA1 in out and len(POSTS) == n, out[:160])
 
     cliente(CA2)
     n = len(POSTS)
-    out = await server.criar_campanha(nome="camp na 02", conta=CA2, cliente="primos")
+    out = await server.criar_campanha(nome="camp na 02", conta=CA2, cliente="alfa")
     check("conta liberada: cria na conta pedida (PAUSADA)",
           POSTS[n][0] == f"act_{CA2}/campaigns" and POSTS[n][1].get("status") == "PAUSED" and "PAUSADA" in out, out[:120])
-    out = await server.criar_campanha(nome="camp na 02 com act_", conta=f"act_{CA2}", cliente="primos")
+    out = await server.criar_campanha(nome="camp na 02 com act_", conta=f"act_{CA2}", cliente="alfa")
     check("aceita o ID com act_", POSTS[-1][0] == f"act_{CA2}/campaigns", out[:100])
 
     n = len(POSTS)
-    out = await server.criar_campanha(nome="camp na 03", conta=CA3, cliente="primos")
+    out = await server.criar_campanha(nome="camp na 03", conta=CA3, cliente="alfa")
     check("liberar uma conta não libera as outras", out.startswith("ERRO") and "não está liberada" in out and len(POSTS) == n)
-    out = await server.criar_campanha(nome="camp pelo nome", conta="CA 02 PRIMOS", cliente="primos")
+    out = await server.criar_campanha(nome="camp pelo nome", conta="CA 02 ALFA", cliente="alfa")
     check("nome de conta não vale para escrever (só ID numérico)", out.startswith("ERRO") and "ID numérico" in out and len(POSTS) == n, out[:120])
 
     n = len(POSTS)
-    out = await server.alterar_status(ids=["120000000000000002"], acao="pausar", cliente="primos")
+    out = await server.alterar_status(ids=["120000000000000002"], acao="pausar", cliente="alfa")
     check("objeto de conta liberada: altera sem precisar informar a conta",
           POSTS[n][0] == "120000000000000002" and POSTS[n][1] == {"status": "PAUSED"} and "ERRO" not in out, out[:120])
     n = len(POSTS)
-    out = await server.alterar_status(ids=["120000000000000003"], acao="pausar", cliente="primos")
+    out = await server.alterar_status(ids=["120000000000000003"], acao="pausar", cliente="alfa")
     check("objeto de conta NÃO liberada: recusado sem enviar nada",
           "ERRO" in out and "nem uma conta liberada" in out and len(POSTS) == n, out[:160])
 
-    out = await server.listar_pixels(conta=CA2, cliente="primos")
-    check("leitura de apoio na conta liberada", "Pixel CA 02 PRIMOS" in out, out[:120])
-    out = await server.listar_pixels(conta=CA3, cliente="primos")
+    out = await server.listar_pixels(conta=CA2, cliente="alfa")
+    check("leitura de apoio na conta liberada", "Pixel CA 02 ALFA" in out, out[:120])
+    out = await server.listar_pixels(conta=CA3, cliente="alfa")
     check("leitura de apoio em conta não liberada: recusada", out.startswith("ERRO") and "não está liberada" in out)
 
-    hist = [json.loads(l) for l in (tmp / "historico/primos.jsonl").read_text().splitlines()]
+    hist = [json.loads(l) for l in (tmp / "historico/alfa.jsonl").read_text().splitlines()]
     check("histórico guarda a conta de cada ação", any(h.get("conta") == CA2 for h in hist) and any(h.get("conta") == CA1 for h in hist), str(hist[-1])[:160])
 
     # app: grava e lê a lista
-    painel.op_config("primos", {"contas_liberadas": [CA2, f"act_{CA3}"]})
-    check("app grava as contas liberadas no arquivo do cliente", f"CONTAS_LIBERADAS={CA2},{CA3}" in (tmp / "clientes/primos.env").read_text())
+    painel.op_config("alfa", {"contas_liberadas": [CA2, f"act_{CA3}"]})
+    check("app grava as contas liberadas no arquivo do cliente", f"CONTAS_LIBERADAS={CA2},{CA3}" in (tmp / "clientes/alfa.env").read_text())
     est = painel.op_estado()["clientes"][0]
     check("app mostra as liberadas (sem repetir a padrão)", est["contas_liberadas"] == [CA2, CA3] and est["conta_padrao"] == CA1, str(est["contas_liberadas"]))
     try:
-        painel.op_config("primos", {"contas_liberadas": ["abc"]}); recusou = False
+        painel.op_config("alfa", {"contas_liberadas": ["abc"]}); recusou = False
     except painel.Erro:
         recusou = True
     check("app recusa ID inválido", recusou)
-    painel.op_config("primos", {"contas_liberadas": []})
-    check("desmarcar todas limpa a lista e preserva o token", "CONTAS_LIBERADAS=\n" in (tmp / "clientes/primos.env").read_text()
-          and TOKEN in (tmp / "clientes/primos.env").read_text())
+    painel.op_config("alfa", {"contas_liberadas": []})
+    check("desmarcar todas limpa a lista e preserva o token", "CONTAS_LIBERADAS=\n" in (tmp / "clientes/alfa.env").read_text()
+          and TOKEN in (tmp / "clientes/alfa.env").read_text())
     n = len(POSTS)
-    out = await server.criar_campanha(nome="depois de desmarcar", conta=CA2, cliente="primos")
+    out = await server.criar_campanha(nome="depois de desmarcar", conta=CA2, cliente="alfa")
     check("depois de desmarcar, a conta volta a ser recusada", out.startswith("ERRO") and len(POSTS) == n)
 
 asyncio.run(main())

@@ -1,5 +1,14 @@
 # Novidades
 
+## 6.7.2
+
+Melhorias de segurança no repositório. Nada muda no uso do app; atualizar é opcional.
+
+- **Pasta de testes também é varrida:** a varredura de segredos do GitHub ignorava a pasta `testes/` inteira. Agora só aceita os valores falsos conhecidos, então um token real colado num teste por engano bloqueia a publicação.
+- **Varredura também nos testes locais:** `bash testes/rodar.sh` começa procurando token da Meta, chaves de API e chaves privadas em todos os arquivos, antes de qualquer envio.
+- **Sem dados reais de clientes no repositório público:** nomes de clientes e IDs de contas usados nos testes, exemplos e na documentação foram trocados por fictícios.
+- Nenhum token ou chave vazou em nenhuma versão: a varredura completa do histórico (todas as versões, branches e tags) não encontrou nada.
+
 ## 6.7.1
 
 Refinamentos da proteção e avisos antes de ativar. Atualize pelo app e feche e abra o Claude (Cmd+Q).

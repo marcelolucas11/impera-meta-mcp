@@ -24,7 +24,7 @@ def instalacao() -> tuple:
         src = REPO / item
         shutil.copytree(src, inst / item) if src.is_dir() else shutil.copy2(src, inst / item)
     (inst / "clientes").mkdir()
-    (inst / "clientes/primos.env").write_text("NOME=Primos\nMETA_ACCESS_TOKEN=TOKEN_TESTE_APP\nMETA_AD_ACCOUNT_ID=111\n")
+    (inst / "clientes/alfa.env").write_text("NOME=Alfa\nMETA_ACCESS_TOKEN=TOKEN_TESTE_APP\nMETA_AD_ACCOUNT_ID=111\n")
     return home, inst
 
 
@@ -154,9 +154,9 @@ check("script do app nativo: menu Editar para colar o token e Cmd+W para fechar"
 
 # ── 6. interface: permissões, histórico e segundo plano ──
 home6, inst6 = instalacao()
-(inst6 / "clientes/primos.env").write_text("NOME=Primos\nMETA_ACCESS_TOKEN=TOKEN_TESTE_APP\nMETA_AD_ACCOUNT_ID=111\nPERMISSOES=\n")
+(inst6 / "clientes/alfa.env").write_text("NOME=Alfa\nMETA_ACCESS_TOKEN=TOKEN_TESTE_APP\nMETA_AD_ACCOUNT_ID=111\nPERMISSOES=\n")
 (inst6 / "historico").mkdir()
-(inst6 / "historico/primos.jsonl").write_text(json.dumps({"quando": "2026-10-15T19:30:00", "ferramenta": "alterar_orcamento", "alvo": "1",
+(inst6 / "historico/alfa.jsonl").write_text(json.dumps({"quando": "2026-10-15T19:30:00", "ferramenta": "alterar_orcamento", "alvo": "1",
     "parametros": {}, "ok": True, "resultado": "campaign [VENDAS] cpa_600 (1): diário BRL 500.00 -> 350.00"}) + "\n")
 rodar(inst6, home6, "--url"); e6 = estado(inst6)
 from playwright.sync_api import sync_playwright, expect  # noqa: E402
@@ -176,12 +176,12 @@ with sync_playwright() as pw:
     check("edição não salva sobrevive a um redesenho", pg.input_value("#teto") == "1.500,00" and pg.locator("#permissoes [data-perm]:checked").count() == 2)
     pg.click("#btn-permissoes")
     expect(pg.locator("#msg-permissoes")).to_contain_text("Permissões salvas")
-    env = (inst6 / "clientes/primos.env").read_text()
+    env = (inst6 / "clientes/alfa.env").read_text()
     check("salvar permissões grava no cliente (e o teto normalizado)", "PERMISSOES=status,criar" in env and "ORCAMENTO_MAX_DIA=1500" in env, env.replace("\n", " | ")[-70:])
     pg.locator("#permissoes label.chave", has_text="Exigir período").click()
     pg.click("#btn-permissoes")
     expect(pg.locator("#msg-permissoes")).to_contain_text("Permissões salvas")
-    env = (inst6 / "clientes/primos.env").read_text()
+    env = (inst6 / "clientes/alfa.env").read_text()
     check("chave 'Exigir período' grava no cliente", "EXIGIR_PERIODO=1" in env and "PERMISSOES=status,criar" in env, env.replace("\n", " | ")[-80:])
     # O painel recarrega o estado e redesenha a ficha em segundo plano: espera até a chave aparecer (sem corrida).
     for _ in range(20):
@@ -198,7 +198,7 @@ with sync_playwright() as pw:
         except AssertionError:
             pg.wait_for_timeout(300)
     expect(pg.locator("#msg-permissoes")).to_contain_text("Teto de orçamento inválido")
-    check("teto inválido recusado", "ORCAMENTO_MAX_DIA=1500" in (inst6 / "clientes/primos.env").read_text())
+    check("teto inválido recusado", "ORCAMENTO_MAX_DIA=1500" in (inst6 / "clientes/alfa.env").read_text())
     fundo = pg.locator("#chk-fundo")
     check("chave de segundo plano no rodapé", pg.locator("#fundo").inner_text().startswith("Manter em segundo plano"))
     if fundo.is_disabled():  # fora do Mac a chave fica desligada; a API foi testada acima

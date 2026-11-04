@@ -36,18 +36,18 @@ def instalacao_com_dados(base: Path, versao="4.1.0") -> Path:
     inst = base / "meta-ads-mcp"
     copiar_programa(inst, versao)
     (inst / "clientes").mkdir()
-    (inst / "clientes/primos.env").write_text(f"NOME=Primos\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID=111\n")
-    os.chmod(inst / "clientes/primos.env", 0o600)
+    (inst / "clientes/alfa.env").write_text(f"NOME=Alfa\nMETA_ACCESS_TOKEN={TOKEN}\nMETA_AD_ACCOUNT_ID=111\n")
+    os.chmod(inst / "clientes/alfa.env", 0o600)
     (inst / ".env").write_text("META_API_VERSION=v26.0\nMETA_EXPORT_DIR=\n")
-    (inst / "relatorios/primos").mkdir(parents=True)
-    (inst / "relatorios/primos/relatorio-antigo.xlsx").write_bytes(b"planilha antiga")
+    (inst / "relatorios/alfa").mkdir(parents=True)
+    (inst / "relatorios/alfa/relatorio-antigo.xlsx").write_bytes(b"planilha antiga")
     (inst / "painel.log").write_text("log antigo\n")
     return inst
 
 
 def dados_do_usuario(inst: Path) -> dict:
     out = {}
-    for rel in ("clientes/primos.env", ".env", "relatorios/primos/relatorio-antigo.xlsx", "painel.log"):
+    for rel in ("clientes/alfa.env", ".env", "relatorios/alfa/relatorio-antigo.xlsx", "painel.log"):
         p = inst / rel
         out[rel] = p.read_bytes() if p.exists() else None
     return out
@@ -115,9 +115,9 @@ antes = dados_do_usuario(inst)
 sys.path.insert(0, str(inst)); atualizar = importlib.import_module("atualizar")
 assert atualizar.BASE == inst
 
-bom = pacote("9.9.9", extras={"impera-meta-mcp/clientes/primos.env": "META_ACCESS_TOKEN=TOKEN_TROCADO_PELO_PACOTE\n",
+bom = pacote("9.9.9", extras={"impera-meta-mcp/clientes/alfa.env": "META_ACCESS_TOKEN=TOKEN_TROCADO_PELO_PACOTE\n",
                               "impera-meta-mcp/.env": "SOBRESCRITO=1\n",
-                              "impera-meta-mcp/relatorios/primos/relatorio-antigo.xlsx": "apagado"})
+                              "impera-meta-mcp/relatorios/alfa/relatorio-antigo.xlsx": "apagado"})
 publicar(bom, "9.9.9", sha="0" * 64)
 info = atualizar.buscar()
 check("buscar: encontra a 9.9.9 com notas", info["disponivel"] and info["nova"] == "9.9.9" and "Novidade" in info["notas"], f"atual {info['atual']}")
@@ -139,9 +139,9 @@ check("atualização boa: 4.1.0 -> 9.9.9", res.get("atualizado") and res["de"] =
 check("código novo instalado", "versao-de-teste-9.9.9" in (inst / "painel.html").read_text())
 check("instaladores continuam executáveis depois de atualizar", os.access(inst / "instalar.sh", os.X_OK) and os.access(inst / "Instalar Impera Meta MCP.command", os.X_OK))
 depois = dados_do_usuario(inst)
-check("token do cliente intacto (o pacote tentou trocar)", depois["clientes/primos.env"] == antes["clientes/primos.env"] and TOKEN.encode() in depois["clientes/primos.env"])
-check("ajustes (.env), relatórios e log intactos", all(depois[k] == antes[k] for k in (".env", "relatorios/primos/relatorio-antigo.xlsx", "painel.log")))
-check("permissão 600 do arquivo do cliente mantida", oct((inst / "clientes/primos.env").stat().st_mode & 0o777) == "0o600")
+check("token do cliente intacto (o pacote tentou trocar)", depois["clientes/alfa.env"] == antes["clientes/alfa.env"] and TOKEN.encode() in depois["clientes/alfa.env"])
+check("ajustes (.env), relatórios e log intactos", all(depois[k] == antes[k] for k in (".env", "relatorios/alfa/relatorio-antigo.xlsx", "painel.log")))
+check("permissão 600 do arquivo do cliente mantida", oct((inst / "clientes/alfa.env").stat().st_mode & 0o777) == "0o600")
 bk = list((inst / ".versoes-anteriores").glob("4.1.0-*"))
 check("versão anterior guardada", len(bk) == 1 and "versao-de-teste" not in (bk[0] / "painel.html").read_text() and (bk[0] / "VERSAO").read_text().strip() == "4.1.0")
 check("sem arquivos temporários sobrando", not list(inst.rglob("*.novo")))
@@ -174,7 +174,7 @@ with sync_playwright() as p:
     expect(pg.locator("#versao")).to_contain_text("Atualizado para a versão 9.9.9", timeout=60000)
     check("atualizou e reabriu sozinho na mesma janela", "versao-de-teste-9.9.9" in pg.content())
     expect(pg.locator(".bilhete")).to_have_count(1)
-    check("cliente continua na lista depois de atualizar", pg.locator(".bilhete .nome").inner_text() == "Primos")
+    check("cliente continua na lista depois de atualizar", pg.locator(".bilhete .nome").inner_text() == "Alfa")
     check("aviso para reiniciar o Claude", "Cmd+Q" in pg.locator("#versao").inner_text())
     if (REPO / "testes/shots").exists():
         pg.screenshot(path=str(REPO / "testes/shots/atualizacao-concluida.png"))
@@ -261,7 +261,7 @@ check("o painel que ficou no ar é o da versão nova", no_ar(novo).get("versao")
 st = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{novo['porta']}/api/atualizacao/buscar", data=b"{}", method="POST",
                             headers={"X-Painel-Chave": novo["chave"], "Content-Type": "application/json"}), timeout=10).status
 check("Buscar atualização responde (sem 'Rota desconhecida')", st == 200)
-check("dados do usuário intactos", (inst4 / "clientes/primos.env").read_text().count(TOKEN) == 1)
+check("dados do usuário intactos", (inst4 / "clientes/alfa.env").read_text().count(TOKEN) == 1)
 encerrar(inst4); time.sleep(1)
 # 4b. arquivos novos no disco com o painel antigo ainda aberto: abrir o app troca o painel
 velho = painel_antigo_no_ar(inst4)
