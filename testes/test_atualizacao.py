@@ -14,7 +14,7 @@ REPO = Path(sys.argv[1]).resolve()
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache") / "ms-playwright"))
 PY = sys.executable
 PROGRAMA = ["server.py", "protecao.py", "cofre.py", "painel.py", "painel.html", "configurar.py", "atualizar.py", "instalar.sh",
-            "Instalar Impera Meta MCP.command", "requirements.txt", ".env.example", "VERSAO", "README.md",
+            "Instalar Impera Meta MCP.command", "instalar-windows.ps1", "requirements.txt", ".env.example", "VERSAO", "README.md",
             "NOVIDADES.md", "recursos"]
 TOKEN = "TOKEN_DO_CLIENTE_NAO_PODE_SUMIR_123"
 ok = []

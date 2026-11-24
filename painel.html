@@ -222,9 +222,17 @@ function desenharRol() {
   const cl = estado.claude || {};
   $("#claude").innerHTML = cl.registrado
     ? `<b>Claude Desktop ligado</b>${esc(avisoClaude || "O Claude já enxerga estes clientes.")}`
-    : `<b>Claude Desktop ainda não ligado</b>${cl.instalado ? "Ligue para o Claude usar estes clientes." : "Não achei o Claude Desktop neste Mac."}
+    : `<b>Claude Desktop ainda não ligado</b>${cl.instalado ? "Ligue para o Claude usar estes clientes." : `Não achei o Claude Desktop ${neste()}.`}
        <div class="acao"><button class="btn leve" type="button" id="btn-claude">Ligar ao Claude</button></div>`;
   desenharFundo();
+}
+
+function windows() { return estado && estado.sistema === "windows"; }
+function neste() { return windows() ? "neste computador" : "neste Mac"; }
+function deste() { return windows() ? "deste computador" : "deste Mac"; }
+function maiuscula(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
+function fecharClaude() {
+  return windows() ? "feche o Claude por completo (ícone do Claude perto do relógio, botão direito, Sair)" : "feche o Claude (Cmd+Q)";
 }
 
 function desenharFundo() {
@@ -232,7 +240,8 @@ function desenharFundo() {
   $("#fundo").innerHTML = `<label class="chave"><input type="checkbox" id="chk-fundo" ${ligado ? "checked" : ""} ${disponivel ? "" : "disabled"}>
       <span class="trilho" aria-hidden="true"></span>
       <span><b>Manter em segundo plano</b>
-      <small>${ligado ? "Fechar o app deixa o painel ativo, e ele volta sozinho ao ligar o Mac. Avisa quando houver versão nova."
+      <small>${!disponivel && windows() ? "Por enquanto, só no Mac. No Windows, fechar a janela encerra o painel depois de alguns minutos."
+                       : ligado ? "Fechar o app deixa o painel ativo, e ele volta sozinho ao ligar o Mac. Avisa quando houver versão nova."
                        : "Fechar o app encerra o painel."} O Claude acessa a Meta com o app aberto ou fechado.</small></span></label>
     <div id="msg-fundo"></div>`;
 }
@@ -258,7 +267,7 @@ function desenharFicha() {
       <p class="dica">Cole nas instruções do projeto deste cliente. Ali dentro, o Claude passa a puxar só os dados dele.</p>
       <p class="instrucao" id="instrucao" style="margin-top:12px">Neste projeto o cliente do Impera Meta MCP é <b>${esc(c.id)}</b>. Passe cliente="${esc(c.id)}" em toda chamada do servidor meta-ads e nunca consulte outro cliente aqui.</p></section>
     <section><div class="cab"><h2>Remover cliente</h2></div>
-      <p class="dica">Apaga o token deste Mac. Os relatórios já exportados ficam na pasta. Para invalidar o token de vez, revogue-o também na BM.</p>
+      <p class="dica">Apaga o token ${deste()}. Os relatórios já exportados ficam na pasta. Para invalidar o token de vez, revogue-o também na BM.</p>
       <div class="junto" id="remover" style="margin-top:12px"><button class="btn perigo" type="button" id="btn-remover">Remover ${esc(c.nome)}</button></div></section>`;
   desenharTopo(); desenharResumo(); desenharConexao(); desenharPermissoes(); desenharRelatorios(); puxarHistorico(c.id);
 }
@@ -308,7 +317,7 @@ function desenharConexao() {
   }
   $("#conexao").innerHTML = `
     <div class="linha"><span>Token</span><div class="junto" id="token-area">
-      <span>Guardado neste Mac. Nunca aparece nesta janela.</span><button class="btn leve" type="button" id="btn-trocar">Trocar token</button></div></div>
+      <span>Guardado ${neste()}. Nunca aparece nesta janela.</span><button class="btn leve" type="button" id="btn-trocar">Trocar token</button></div></div>
     ${d ? `<div class="linha"><span>Dono do token</span><span>${esc(d.dono || "–")}</span></div>` : ""}
     ${d && d.permissoes ? `<div class="linha"><span>Permissões</span><div class="etiquetas">${d.permissoes.map((p) => `<span>${esc(p)}</span>`).join("") || "nenhuma"}</div></div>` : ""}
     <div class="linha"><label for="sel-conta">Conta padrão</label>${contaCampo}</div>
@@ -411,7 +420,7 @@ function desenharRelatorios() {
     ${arqs.length ? `<table><thead><tr><th>Arquivo</th><th>Exportado em</th><th class="num">Tamanho</th><th></th></tr></thead><tbody>
       ${arqs.map((a) => `<tr><td class="arq">${esc(a.nome)}</td><td>${esc(a.quando)}</td><td class="num">${numero(a.kb)} KB</td>
         <td class="acoes"><button class="btn leve" type="button" data-abrir="${esc(a.nome)}">Abrir</button>
-        <button class="btn leve" type="button" data-mostrar="${esc(a.nome)}">Mostrar no Finder</button></td></tr>`).join("")}</tbody></table>`
+        <button class="btn leve" type="button" data-mostrar="${esc(a.nome)}">${windows() ? "Mostrar no Explorador" : "Mostrar no Finder"}</button></td></tr>`).join("")}</tbody></table>`
       : `<p class="dica" style="margin-top:14px">Nenhum relatório exportado ainda. O arquivo traz as Tabelas A, B e C do prompt de análise, a conta por dia e os limites de CPA.</p>`}`;
 }
 
@@ -419,7 +428,7 @@ function desenharNovo(m) {
   const primeiro = estado.clientes.length === 0;
   m.innerHTML = `
     <h1>${primeiro ? "Cadastre o primeiro cliente" : "Novo cliente"}</h1>
-    <p class="sub">Cada cliente tem o próprio token. O token fica só neste Mac e nunca aparece nesta janela depois de salvo.</p>
+    <p class="sub">Cada cliente tem o próprio token. O token fica só ${neste()} e nunca aparece nesta janela depois de salvo.</p>
     ${estado.token_antigo ? `<section><div class="cab"><h2>Token da instalação anterior</h2></div>
       <p class="dica">Há um token salvo pela versão antiga. Diga de qual cliente ele é para aproveitá-lo.</p>
       <div class="junto" style="margin-top:12px"><input class="campo" id="nome-antigo" placeholder="Nome do cliente" style="max-width:280px" autocomplete="off">
@@ -451,8 +460,8 @@ function desenharVersao() {
   else if (a.fase === "aplicando") corpo = `<p>Baixando e instalando a versão ${esc(a.nova)}. Não feche esta janela.</p>`;
   else if (a.fase === "reiniciando") corpo = `<p>Atualizado para ${esc(a.para)}. Reabrindo o app…</p>`;
   else if (a.fase === "concluida") corpo = `<p class="nova">Atualizado para a versão ${esc(estado.versao)}.</p>
-      <p>Para o Claude usar a versão nova, feche o Claude (Cmd+Q) e abra de novo.</p>
-      ${/Chrome|Edg\//.test(navigator.userAgent) ? `<p>Esta janela é do navegador. Feche-a e abra o Impera Meta MCP pelo Dock ou pela pasta Aplicativos para usar a janela própria do app.</p>` : ""}`;
+      <p>Para o Claude usar a versão nova, ${fecharClaude()} e abra de novo.</p>
+      ${!windows() && /Chrome|Edg\//.test(navigator.userAgent) ? `<p>Esta janela é do navegador. Feche-a e abra o Impera Meta MCP pelo Dock ou pela pasta Aplicativos para usar a janela própria do app.</p>` : ""}`;
   $("#versao").innerHTML = `<div class="topo-versao"><span>Versão ${esc(estado.versao || "–")}</span>
     ${ocupado || ["desatualizado", "reinicie"].includes(a.fase) ? "" : `<button class="btn leve" type="button" id="btn-buscar-atualizacao">Buscar atualização</button>`}</div>${corpo}`;
 }
@@ -591,7 +600,7 @@ document.addEventListener("click", async (ev) => {
       delete resumo[atual]; desenharConexao(); return testar(atual);
     }
     if (b.id === "btn-remover") {
-      $("#remover").innerHTML = `<span>Remover ${esc(c.nome)} e apagar o token deste Mac?</span>
+      $("#remover").innerHTML = `<span>Remover ${esc(c.nome)} e apagar o token ${deste()}?</span>
         <button class="btn perigo" type="button" id="btn-remover-sim">Remover</button><button class="btn leve" type="button" id="btn-remover-nao">Cancelar</button>`; return;
     }
     if (b.id === "btn-remover-nao") return desenharFicha();
@@ -601,7 +610,7 @@ document.addEventListener("click", async (ev) => {
     }
     if (b.id === "btn-claude") {
       const r = await api("POST", "claude/registrar"); estado.claude = r.claude;
-      avisoClaude = r.ok ? "Feche o Claude (Cmd+Q) e abra de novo para ele carregar." : "";
+      avisoClaude = r.ok ? `${maiuscula(fecharClaude())} e abra de novo para ele carregar.` : "";
       desenharRol(); if (!r.ok) $("#claude").insertAdjacentHTML("beforeend", `<p class="aviso erro">Não consegui alterar a configuração do Claude (${esc(r.status)}).</p>`); return;
     }
     if (b.id === "btn-migrar") {

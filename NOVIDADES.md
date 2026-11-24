@@ -1,5 +1,14 @@
 # Novidades
 
+## 6.8.0
+
+Instalador de verdade no Mac e versão para Windows.
+
+- **Mac: o botão "Baixar para Mac" agora baixa um instalador (`Impera-Meta-MCP.pkg`)**, e não mais um `.zip`. É só dar duplo clique e seguir as telas (Continuar, Instalar, senha do Mac). Ele coloca o app na pasta Aplicativos, prepara o Python, liga ao Claude Desktop e abre o app. Se o app já estiver instalado, atualiza por cima: clientes, tokens, permissões e relatórios ficam como estão.
+- **Windows: o Impera Meta MCP agora roda no Windows 10 e 11.** Novo botão "Baixar para Windows" no GitHub, com o instalador `Impera-Meta-MCP-Instalador.exe`: não pede administrador nem Python instalado. O app abre pelo Menu Iniciar ou pelo atalho na Área de Trabalho, numa janela própria do Chrome ou do Edge, com o mesmo cadastro de clientes, permissões, relatórios, histórico e "Buscar atualização" do Mac. O servidor `meta-ads` é ligado ao Claude Desktop sozinho, inclusive no Claude instalado pela Microsoft Store.
+- No Windows, por enquanto, ficam de fora o "Manter em segundo plano" e o cofre no Chaveiro (os dois são recursos do macOS).
+- Para quem já usa no Mac, nada muda: o "Buscar atualização" continua igual. Atualize pelo app e feche o Claude (Cmd+Q) e abra de novo.
+
 ## 6.7.2
 
 Melhorias de segurança no repositório. Nada muda no uso do app; atualizar é opcional.

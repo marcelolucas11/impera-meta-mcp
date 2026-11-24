@@ -51,6 +51,9 @@ NOMES_ANTIGOS = ("Meta Ads MCP",)  # versões anteriores do app, trocadas por es
 OCIOSO_S = 300  # sem janela aberta por este tempo, o servidor do painel se encerra sozinho
 INSTANCIA = secrets.token_hex(6)  # muda a cada processo; a janela usa para saber que o painel reiniciou
 ABRIR_NO_SISTEMA = True  # os testes desligam, para não abrir Finder/navegador
+WINDOWS = sys.platform.startswith("win")
+if WINDOWS:
+    os.environ.setdefault("PYTHONUTF8", "1")  # processos filhos (servidor do painel, pós-atualização) em UTF-8
 
 _ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TOKEN = re.compile(r"^[A-Za-z0-9_\-|.~]+$")
@@ -61,6 +64,19 @@ class Erro(Exception):
     def __init__(self, msg: str, status: int = 400):
         super().__init__(msg)
         self.status = status
+
+
+def _em_separado() -> dict:
+    """Opções do Popen para um processo que segue sozinho depois que este sai.
+    No Windows, sem a janela preta do console; no Mac/Linux, numa sessão própria."""
+    if WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)}
+    return {"start_new_session": True}
+
+
+def _uid_alvo() -> str:
+    return f"gui/{os.getuid()}" if hasattr(os, "getuid") else ""
 
 
 # ───────────────────────── operações ─────────────────────────
@@ -89,14 +105,15 @@ def _relatorios(cid: str) -> list:
 
 
 def _claude() -> dict:
-    caminho = configurar.caminho_config_claude()
-    registrado = False
-    try:
-        cfg = json.loads(caminho.read_text(encoding="utf-8"))
-        registrado = (cfg.get("mcpServers") or {}).get(configurar.NOME_SERVIDOR) == configurar.entrada_servidor()
-    except (OSError, ValueError, AttributeError):
-        pass
-    return {"registrado": registrado, "instalado": caminho.parent.is_dir()}
+    registrado, instalado = False, False
+    for caminho in configurar.caminhos_config_claude():
+        instalado = instalado or caminho.parent.is_dir()
+        try:
+            cfg = json.loads(caminho.read_text(encoding="utf-8-sig"))
+            registrado = registrado or (cfg.get("mcpServers") or {}).get(configurar.NOME_SERVIDOR) == configurar.entrada_servidor()
+        except (OSError, ValueError, AttributeError):
+            pass
+    return {"registrado": registrado, "instalado": instalado}
 
 
 def _limites(v: dict) -> list:
@@ -129,6 +146,7 @@ def op_estado() -> dict:
         "segundo_plano_disponivel": sys.platform == "darwin" and bool(shutil.which("launchctl")),
         "token_antigo": bool(raiz) and raiz != configurar.PLACEHOLDER,
         "claude": _claude(),
+        "sistema": "windows" if WINDOWS else ("mac" if sys.platform == "darwin" else "linux"),
         "versao_api": server._api_version(),
         "hoje": date.today().isoformat(),
         "versao": atualizar.versao_local(),
@@ -331,17 +349,17 @@ def recarregar_servico(atraso: float = 0) -> None:
     _escrever_plist()
     if sys.platform != "darwin" or not shutil.which("launchctl"):
         return
-    alvo = f"gui/{os.getuid()}"
+    alvo = _uid_alvo()
     comando = (f"sleep {atraso}; launchctl bootout {alvo}/{ROTULO_LAUNCHD} >/dev/null 2>&1; sleep 1; "
                f"launchctl bootstrap {alvo} '{_plist_launchd()}' >/dev/null 2>&1")
     subprocess.Popen(["/bin/bash", "-c", comando], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+                     stderr=subprocess.DEVNULL, **_em_separado())
 
 
 def op_segundo_plano(srv, ativo: bool) -> dict:
     """Ligado: o painel roda pelo launchd (continua com o app fechado e volta ao ligar o Mac).
     Desligado: fechar o app encerra o painel."""
-    alvo = f"gui/{os.getuid()}"
+    alvo = _uid_alvo()
     configurar.gravar_env(configurar.ENV, {"SEGUNDO_PLANO": "1" if ativo else "0"})
     if ativo:
         _escrever_plist()
@@ -365,7 +383,7 @@ def op_segundo_plano(srv, ativo: bool) -> dict:
                 time.sleep(0.8)
                 log = open(BASE / "painel.log", "a")
                 subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"],
-                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, **_em_separado(),
                                  cwd=str(BASE), env={k: v for k, v in os.environ.items() if k != "IMPERA_LAUNCHD"})
                 srv.manter_estado = True
                 _launchctl("bootout", f"{alvo}/{ROTULO_LAUNCHD}")
@@ -405,6 +423,11 @@ def op_abrir(dados: dict) -> dict:
     if ABRIR_NO_SISTEMA and sys.platform == "darwin":
         cmd = ["open", str(alvo)] if dados.get("modo") == "abrir" or alvo == pasta else ["open", "-R", str(alvo)]
         subprocess.run(cmd, check=False)
+    elif ABRIR_NO_SISTEMA and WINDOWS:
+        if dados.get("modo") == "abrir" or alvo == pasta:
+            os.startfile(str(alvo))  # noqa: abre no Explorador / no Excel
+        else:
+            subprocess.run(f'explorer /select,"{alvo}"', check=False)  # Explorador com o arquivo selecionado
     return {"ok": True, "caminho": str(alvo)}
 
 
@@ -436,7 +459,8 @@ def op_aplicar_atualizacao(srv) -> dict:
     _busca_cache.clear()
     # O código novo refaz o app e confere a ligação com o Claude.
     subprocess.run([sys.executable, str(BASE / "painel.py"), "--pos-atualizacao"], cwd=str(BASE),
-                   capture_output=True, timeout=120, check=False)
+                   capture_output=True, timeout=120, check=False,
+                   **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)} if WINDOWS else {}))
 
     def reiniciar():
         time.sleep(0.8)  # deixa a resposta chegar na janela
@@ -446,7 +470,7 @@ def op_aplicar_atualizacao(srv) -> dict:
             return
         log = open(BASE / "painel.log", "a")
         subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir", "--reaproveitar"], stdin=subprocess.DEVNULL,
-                         stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
+                         stdout=log, stderr=log, **_em_separado(), cwd=str(BASE))
         srv.manter_estado = True  # o processo novo regrava o estado; este não pode apagá-lo
         srv.shutdown()
 
@@ -456,7 +480,7 @@ def op_aplicar_atualizacao(srv) -> dict:
 
 def op_registrar_claude() -> dict:
     try:
-        status = configurar.registrar_no_claude(configurar.caminho_config_claude())
+        status = configurar.registrar_em_todos()
     except OSError as e:
         status = f"erro: {e}"
     return {"ok": status in ("ok", "igual"), "status": status, "claude": _claude()}
@@ -760,7 +784,7 @@ def garantir_servidor() -> dict:
             time.sleep(0.25)
     log = open(BASE / "painel.log", "a")
     subprocess.Popen([sys.executable, str(BASE / "painel.py"), "--servir"], stdin=subprocess.DEVNULL,
-                     stdout=log, stderr=log, start_new_session=True, cwd=str(BASE))
+                     stdout=log, stderr=log, **_em_separado(), cwd=str(BASE))
     for _ in range(60):
         time.sleep(0.25)
         est = _no_ar()
@@ -778,8 +802,24 @@ def abrir_janela(url: str) -> None:
                 if r.returncode == 0:
                     return
         subprocess.run(["open", url], check=False)
+    elif WINDOWS:
+        # Mesma ideia no Windows: janela própria do Chrome/Edge/Brave (o Edge vem com o Windows 10 e 11).
+        for exe in _navegadores_windows():
+            try:
+                subprocess.Popen([str(exe), f"--app={url}", "--window-size=1180,840"], **_em_separado())
+                return
+            except OSError:
+                continue
+        webbrowser.open(url)
     else:
         webbrowser.open(url)
+
+
+def _navegadores_windows() -> list:
+    bases = [os.environ.get(k) for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    relativos = (r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe",
+                 r"BraveSoftware\Brave-Browser\Application\brave.exe")
+    return [Path(b) / r for r in relativos for b in bases if b and (Path(b) / r).is_file()]
 
 
 def _pasta_aplicativos() -> Path:
@@ -791,7 +831,56 @@ def _pasta_aplicativos() -> Path:
 
 
 def caminho_app() -> Path:
+    if WINDOWS:
+        return _pasta_menu_iniciar() / f"{NOME_APP}.lnk"
     return _pasta_aplicativos() / f"{NOME_APP}.app"
+
+
+# ───────────────────────── Windows: atalhos ─────────────────────────
+
+def _pasta_menu_iniciar() -> Path:
+    return Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs"
+
+
+_SCRIPT_ATALHOS = r"""
+$ErrorActionPreference = 'Stop'
+$s = New-Object -ComObject WScript.Shell
+$destinos = @($env:IMPERA_LNK_MENU)
+try { $destinos += (Join-Path ([Environment]::GetFolderPath('Desktop')) ($env:IMPERA_NOME + '.lnk')) } catch {}
+foreach ($d in $destinos) {
+  $l = $s.CreateShortcut($d)
+  $l.TargetPath = $env:IMPERA_ALVO
+  $l.Arguments = $env:IMPERA_ARGS
+  $l.WorkingDirectory = $env:IMPERA_PASTA
+  if (Test-Path $env:IMPERA_ICONE) { $l.IconLocation = $env:IMPERA_ICONE + ',0' }
+  $l.Description = 'Impera Meta MCP: clientes, tokens e relatórios do Meta Ads'
+  $l.Save()
+}
+"""
+
+
+def _criar_atalhos_windows() -> Optional[Path]:
+    """Menu Iniciar e Área de Trabalho. O atalho usa o pythonw.exe (sem janela preta) e abre o painel numa janela
+    própria do Chrome/Edge. Criado por um script do PowerShell, com os caminhos passados por variáveis de ambiente
+    (nada de montar comando com caminho do usuário no meio)."""
+    exe = Path(sys.executable)
+    janela = exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").is_file() else exe
+    menu = caminho_app()
+    menu.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, IMPERA_LNK_MENU=str(menu), IMPERA_NOME=NOME_APP, IMPERA_ALVO=str(janela),
+               IMPERA_ARGS=f'-X utf8 "{BASE / "painel.py"}" --abrir', IMPERA_PASTA=str(BASE),
+               IMPERA_ICONE=str(RECURSOS / "icone.ico"))
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                            "-Command", _SCRIPT_ATALHOS], env=env, capture_output=True, text=True, timeout=90,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"Não consegui criar os atalhos: {e}", file=sys.stderr)
+        return None
+    if r.returncode != 0 or not menu.exists():
+        print(f"Não consegui criar os atalhos: {(r.stderr or r.stdout).strip()[:300]}", file=sys.stderr)
+        return None
+    return menu
 
 
 def _e_nosso(app: Path) -> bool:
@@ -889,6 +978,8 @@ def _criar_lancador(app: Path) -> None:
 def criar_app() -> Optional[Path]:
     """Monta o .app neste computador. Por ser criado aqui (e não baixado), o macOS o abre
     sem o aviso de desenvolvedor não identificado."""
+    if WINDOWS and not os.environ.get("PAINEL_FORCAR_APP"):
+        return _criar_atalhos_windows()
     if sys.platform != "darwin" and not os.environ.get("PAINEL_FORCAR_APP"):
         return None
     app = caminho_app()
@@ -972,7 +1063,8 @@ def main() -> None:
             print(f"App criado: {app}")
         recarregar_servico()
         r = op_registrar_claude()
-        print("Claude Desktop: " + {"ok": "servidor 'meta-ads' registrado. Feche o Claude (Cmd+Q) e abra de novo.",
+        reiniciar = "Feche o Claude por completo (ícone perto do relógio > Sair) e abra de novo." if WINDOWS else "Feche o Claude (Cmd+Q) e abra de novo."
+        print("Claude Desktop: " + {"ok": "servidor 'meta-ads' registrado. " + reiniciar,
                                      "igual": "servidor 'meta-ads' já estava registrado."}.get(r["status"], "não registrado (" + r["status"] + "); use o botão no painel."))
     if not (a.sem_janela or os.environ.get("PAINEL_SEM_JANELA")) and abrir_app():
         if a.instalar_app:
@@ -985,7 +1077,8 @@ def main() -> None:
     else:
         abrir_janela(url)
         if a.instalar_app:
-            print(f"Painel aberto. Da próxima vez, abra o app \"{NOME_APP}\" pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos.")
+            onde = "pelo Menu Iniciar ou pelo atalho na Área de Trabalho" if WINDOWS else "pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos"
+            print(f"Painel aberto. Da próxima vez, abra o app \"{NOME_APP}\" {onde}.")
 
 
 if __name__ == "__main__":

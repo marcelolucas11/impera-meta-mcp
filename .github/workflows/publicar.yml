@@ -1,7 +1,8 @@
 name: Testar e publicar
 
-# Cada push na main roda os testes. Se a VERSAO ainda não tiver release, o próprio workflow
-# cria a tag vX.Y.Z, monta o pacote e publica a release (não é preciso criar tag à mão).
+# Cada push na main roda os testes (Linux e Windows). Se a VERSAO ainda não tiver release, o próprio workflow
+# cria a tag vX.Y.Z, monta o pacote de atualização (.zip), o instalador do Mac (.pkg, num runner macOS) e o
+# instalador do Windows (.exe, num runner Windows) e publica tudo na release (não é preciso criar tag à mão).
 on:
   push:
     branches: [main]
@@ -27,6 +28,35 @@ jobs:
           .venv/bin/python -m playwright install --with-deps chromium
       - name: Testes (API da Meta simulada, nenhum token real)
         run: bash testes/rodar.sh
+
+  windows:
+    # Instala de verdade num Windows (pelo mesmo script que o instalador .exe usa) e confere app, atalhos,
+    # Claude Desktop, servidor MCP e painel. Depois roda os testes do servidor no Python do Windows.
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar pelo instalar-windows.ps1
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\instalar-windows.ps1 -Origem . -SemJanela
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Conferir a instalação
+        shell: powershell
+        run: |
+          & "$env:USERPROFILE\meta-ads-mcp\.venv\Scripts\python.exe" testes\test_windows.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Testes do servidor no Windows (API da Meta simulada)
+        shell: bash
+        run: |
+          PY="$USERPROFILE/meta-ads-mcp/.venv/Scripts/python.exe"
+          falhou=0
+          for t in test_segredos test_multi test_escrita test_limites test_contas test_conferencia; do
+            echo "== $t =="; "$PY" "testes/$t.py" . || falhou=1
+          done
+          echo "== test_stdio_multi =="; "$PY" testes/test_stdio_multi.py "$PY" testes/wrap_server.py . || falhou=1
+          exit $falhou
 
   segredos:
     # Varre o código e todo o histórico atrás de token da Meta, chaves e segredos. Se achar algo, nada é publicado.
@@ -54,12 +84,16 @@ jobs:
           fi
           exit $rc
 
-  publicar:
-    needs: [testes, segredos]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  pacote:
+    # Pacote de atualização (.zip + .sha256): é o que o botão "Buscar atualização" baixa, e a base dos dois instaladores.
+    # Em pull request, o pacote e os instaladores também são montados e testados, mas nada é publicado.
+    needs: [testes, windows, segredos]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      publicar: ${{ steps.versao.outputs.publicar }}
+      tag: ${{ steps.versao.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Versão nova?
@@ -67,23 +101,113 @@ jobs:
         run: |
           V="v$(cat VERSAO)"
           echo "tag=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "$V" >/dev/null 2>&1; then
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "Fora da main: monta e testa os instaladores, sem publicar."
+            echo "publicar=nao" >> "$GITHUB_OUTPUT"
+          elif gh release view "$V" >/dev/null 2>&1; then
             echo "A release $V já existe; nada a publicar."
             echo "publicar=nao" >> "$GITHUB_OUTPUT"
           else
             echo "publicar=sim" >> "$GITHUB_OUTPUT"
           fi
       - name: Montar pacote
-        if: steps.versao.outputs.publicar == 'sim'
         run: bash empacotar.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacote
+          path: dist/
+
+  instalador-mac:
+    needs: pacote
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacote
+          path: dist
+      - name: Montar Impera-Meta-MCP.pkg
+        run: bash instaladores/mac/montar-pkg.sh
+      - name: Instalar o .pkg neste Mac e conferir
+        run: |
+          sudo installer -pkg dist/Impera-Meta-MCP.pkg -target / -verboseR || { cat /tmp/impera-meta-mcp-instalacao.log; exit 1; }
+          cat /tmp/impera-meta-mcp-instalacao.log
+          test -f "$HOME/meta-ads-mcp/VERSAO" && test "$(cat "$HOME/meta-ads-mcp/VERSAO")" = "$(cat VERSAO)"
+          test -x "$HOME/meta-ads-mcp/.venv/bin/python"
+          test -d "/Applications/Impera Meta MCP.app" || test -d "$HOME/Applications/Impera Meta MCP.app"
+          grep -q '"meta-ads"' "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          echo "Instalação pelo .pkg conferida."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-mac
+          path: dist/Impera-Meta-MCP.pkg*
+
+  instalador-windows:
+    needs: pacote
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacote
+          path: dist
+      - name: Preparar arquivos (pacote da release + uv.exe oficial conferido pelo checksum)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist\win | Out-Null
+          Expand-Archive dist\impera-meta-mcp.zip -DestinationPath dist\win -Force
+          $base = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
+          Invoke-WebRequest -UseBasicParsing $base -OutFile uv.zip
+          $esperado = ((Invoke-WebRequest -UseBasicParsing "$base.sha256").Content -split '\s+')[0].Trim().ToLower()
+          if ((Get-FileHash uv.zip -Algorithm SHA256).Hash.ToLower() -ne $esperado) { throw 'uv: checksum não confere' }
+          Expand-Archive uv.zip -DestinationPath uvx -Force
+          Copy-Item (Get-ChildItem uvx -Recurse -Filter uv.exe | Select-Object -First 1).FullName dist\win\uv.exe
+      - name: Montar Impera-Meta-MCP-Instalador.exe (Inno Setup)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc "/DVersao=$((Get-Content VERSAO -Raw).Trim())" instaladores\windows\impera-meta-mcp.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $h = (Get-FileHash dist\Impera-Meta-MCP-Instalador.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Encoding ascii dist\Impera-Meta-MCP-Instalador.exe.sha256 "$h  Impera-Meta-MCP-Instalador.exe`n"
+      - name: Instalar o .exe em modo silencioso e conferir
+        shell: powershell
+        run: |
+          $p = Start-Process dist\Impera-Meta-MCP-Instalador.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=inno.log' -Wait -PassThru
+          Get-Content "$env:TEMP\impera-meta-mcp-instalacao.log" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { Get-Content inno.log -Tail 40; exit 1 }
+          & "$env:USERPROFILE\meta-ads-mcp\.venv\Scripts\python.exe" testes\test_windows.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-windows
+          path: dist/Impera-Meta-MCP-Instalador.exe*
+
+  publicar:
+    needs: [pacote, instalador-mac, instalador-windows]
+    if: needs.pacote.outputs.publicar == 'sim'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Notas da versão
-        if: steps.versao.outputs.publicar == 'sim'
         run: |
           awk -v v="## $(cat VERSAO)" '$0==v{on=1;next} /^## /{on=0} on' NOVIDADES.md > notas.md
           test -s notas.md || { echo "Falta a seção '## $(cat VERSAO)' no NOVIDADES.md"; exit 1; }
           cat notas.md
       - name: Publicar release
-        if: steps.versao.outputs.publicar == 'sim'
         run: |
-          gh release create "${{ steps.versao.outputs.tag }}" dist/impera-meta-mcp.zip dist/impera-meta-mcp.zip.sha256 \
-            --target "$GITHUB_SHA" --title "Impera Meta MCP ${{ steps.versao.outputs.tag }}" --notes-file notas.md --latest
+          ls -l dist
+          gh release create "${{ needs.pacote.outputs.tag }}" \
+            dist/impera-meta-mcp.zip dist/impera-meta-mcp.zip.sha256 \
+            dist/Impera-Meta-MCP.pkg dist/Impera-Meta-MCP.pkg.sha256 \
+            dist/Impera-Meta-MCP-Instalador.exe dist/Impera-Meta-MCP-Instalador.exe.sha256 \
+            --target "$GITHUB_SHA" --title "Impera Meta MCP ${{ needs.pacote.outputs.tag }}" --notes-file notas.md --latest

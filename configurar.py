@@ -115,8 +115,52 @@ def caminho_config_claude() -> Path:
     return Path.home() / ".config/Claude/claude_desktop_config.json"
 
 
+def caminhos_config_claude() -> list:
+    """Todos os lugares onde o Claude Desktop pode ler a configuração neste computador.
+    No Windows, o Claude instalado como pacote (MSIX, pela Microsoft Store ou pelo instalador novo) lê de uma cópia
+    própria em %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude; registrar só em %APPDATA% não basta."""
+    caminhos = [caminho_config_claude()]
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
+        try:
+            pacotes = sorted((local / "Packages").glob("Claude_*"))
+        except OSError:
+            pacotes = []
+        for pac in pacotes:
+            caminhos.append(pac / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json")
+    return caminhos
+
+
+def registrar_em_todos() -> str:
+    """Registra o servidor em cada configuração do Claude Desktop existente. Devolve o pior resultado."""
+    resultados = []
+    for i, cfg in enumerate(caminhos_config_claude()):
+        if i and not cfg.parent.is_dir():
+            continue
+        try:
+            resultados.append(registrar_no_claude(cfg))
+        except OSError as e:
+            resultados.append(f"erro: {e}")
+    for r in resultados:
+        if r not in ("ok", "igual"):
+            return r
+    return "ok" if "ok" in resultados else "igual"
+
+
+def python_do_console() -> str:
+    """Python que o Claude Desktop deve rodar. No Windows, o app abre o painel com o pythonw.exe (sem janela preta),
+    mas o servidor MCP conversa pela entrada e saída padrão e precisa do python.exe."""
+    exe = Path(sys.executable)
+    if sys.platform.startswith("win") and exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").is_file():
+        return str(exe.with_name("python.exe"))
+    return sys.executable
+
+
 def entrada_servidor() -> dict:
-    # sys.executable é o Python do .venv; caminho absoluto porque o Claude não herda o PATH do terminal.
+    # Python do .venv; caminho absoluto porque o Claude não herda o PATH do terminal.
+    if sys.platform.startswith("win"):
+        # -X utf8: acentos certos em qualquer idioma do Windows (sem isso, arquivos e mensagens podem sair em cp1252).
+        return {"command": python_do_console(), "args": ["-X", "utf8", str(BASE / "server.py")]}
     return {"command": sys.executable, "args": [str(BASE / "server.py")]}
 
 
@@ -125,7 +169,7 @@ def registrar_no_claude(cfg_path: Path) -> str:
     cfg = {}
     if cfg_path.exists() and cfg_path.read_text(encoding="utf-8").strip():
         try:
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))  # o Bloco de Notas do Windows pode gravar com BOM
         except ValueError:
             return "invalido"
         if not isinstance(cfg, dict):
@@ -257,10 +301,7 @@ def main(argv: Optional[list] = None) -> None:
     mostrar_clientes()
     cfg_path = caminho_config_claude()
     print(f"\nRegistrando no Claude Desktop ({cfg_path})...")
-    try:
-        status = registrar_no_claude(cfg_path)
-    except OSError as e:
-        status = f"erro: {e}"
+    status = registrar_em_todos()
     if status == "ok":
         print("Servidor 'meta-ads' registrado.")
         print("\nÚltimo passo: feche o Claude por completo (Cmd+Q) e abra de novo.")

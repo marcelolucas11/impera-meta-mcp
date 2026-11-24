@@ -256,26 +256,48 @@ def semaforo(token: str, act: str) -> asyncio.Semaphore:
 ARQUIVO_RITMO = ".ritmo.json"  # instante da última escrita por conta, compartilhado entre todos os processos do servidor
 
 
+def _travar(f):
+    """Trava exclusiva do arquivo aberto (Mac/Linux: flock; Windows: msvcrt no primeiro byte). Devolve o destravar."""
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt  # Windows
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)  # tenta por até ~10 s; depois OSError (cai na fila em memória)
+
+        def destravar():
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        return destravar
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return lambda: None  # o flock sai ao fechar o arquivo
+
+
 def _reservar_vaga(base: Optional[Path], k: str) -> float:
     """Reserva o próximo instante livre de escrita para a conta `k`. Com `base`, usa um arquivo com trava, de modo que
     vários processos do servidor (o Claude Desktop pode subir mais de um) formem uma fila só. Devolve o instante."""
     t = agora()
     if base is not None:
         try:
-            import fcntl
             p = Path(base) / ARQUIVO_RITMO
             fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
             with os.fdopen(fd, "r+") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
+                destravar = _travar(f)
                 try:
-                    dados = json.loads(f.read() or "{}")
-                except ValueError:
-                    dados = {}
-                dados = {a: v for a, v in dados.items() if isinstance(v, (int, float)) and v > t - 3600}
-                alvo = max(t, float(dados.get(k, 0.0)) + INTERVALO_ESCRITA)
-                dados[k] = alvo
-                f.seek(0); f.truncate(); f.write(json.dumps(dados))
-                return alvo
+                    try:
+                        dados = json.loads(f.read() or "{}")
+                    except ValueError:
+                        dados = {}
+                    dados = {a: v for a, v in dados.items() if isinstance(v, (int, float)) and v > t - 3600}
+                    alvo = max(t, float(dados.get(k, 0.0)) + INTERVALO_ESCRITA)
+                    dados[k] = alvo
+                    f.seek(0); f.truncate(); f.write(json.dumps(dados)); f.flush()
+                    return alvo
+                finally:
+                    destravar()
         except (OSError, ImportError):
             pass
     alvo = max(t, _ultima_escrita.get(k, 0.0) + INTERVALO_ESCRITA)
