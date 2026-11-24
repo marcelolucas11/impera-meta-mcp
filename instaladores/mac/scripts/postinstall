@@ -1,0 +1,40 @@
+#!/bin/bash
+# Roda como administrador pelo Instalador do macOS, ao fim do Impera-Meta-MCP.pkg.
+# Instala o app para quem está usando o Mac agora (em ~/meta-ads-mcp), com o mesmo instalar.sh de sempre:
+# clientes, tokens, ajustes e relatórios que já existam ficam como estão.
+set -u
+REGISTRO="/tmp/impera-meta-mcp-instalacao.log"
+exec > >(tee -a "$REGISTRO") 2>&1
+echo "== Impera Meta MCP: instalação pelo .pkg ($(date)) =="
+
+AQUI="$(cd "$(dirname "$0")" && pwd)"
+USUARIO="$(stat -f%Su /dev/console 2>/dev/null || true)"
+if [ -z "$USUARIO" ] || [ "$USUARIO" = "root" ] || [ "$USUARIO" = "loginwindow" ]; then
+  echo "Não há ninguém usando o Mac agora (tela de login). Entre na sua conta e abra o instalador de novo."
+  exit 1
+fi
+UID_USUARIO="$(id -u "$USUARIO")"
+CASA="$(dscl . -read "/Users/$USUARIO" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+[ -n "$CASA" ] || CASA="/Users/$USUARIO"
+echo "Usuário: $USUARIO ($CASA)"
+
+TMP="$(mktemp -d /tmp/impera-pkg.XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+ditto -x -k "$AQUI/impera-meta-mcp.zip" "$TMP"
+chown -R "$USUARIO" "$TMP"
+
+# Roda na sessão do usuário (launchctl asuser): o app é montado, ligado ao Claude e aberto na tela dele,
+# e o segundo plano (se estiver ligado) é recarregado no launchd dele.
+# FORCAR_UV: o Python do app vem do uv, sem depender do python3 do sistema (que pode pedir as
+# Ferramentas de Linha de Comando no meio da instalação).
+launchctl asuser "$UID_USUARIO" sudo -u "$USUARIO" -H env \
+  HOME="$CASA" USER="$USUARIO" LOGNAME="$USUARIO" \
+  PATH="$CASA/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  FORCAR_UV=1 UV_NO_MODIFY_PATH=1 LANG="pt_BR.UTF-8" \
+  /bin/bash "$TMP/impera-meta-mcp/instalar.sh" < /dev/null
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "A instalação parou com erro ($rc). Registro completo em $REGISTRO."
+fi
+chmod 644 "$REGISTRO" 2>/dev/null || true
+exit "$rc"

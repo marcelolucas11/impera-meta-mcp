@@ -95,6 +95,9 @@ class MetaError(Exception):
 
 
 def _como_configurar() -> str:
+    if sys.platform.startswith("win"):
+        return ("Abra o app Impera Meta MCP (Menu Iniciar) e cadastre o cliente, ou no PowerShell rode:  "
+                f"& \"{BASE_DIR / '.venv' / 'Scripts' / 'python.exe'}\" \"{BASE_DIR / 'configurar.py'}\"")
     return f"No Terminal, rode:  {BASE_DIR / '.venv' / 'bin' / 'python'} {BASE_DIR / 'configurar.py'}"
 
 

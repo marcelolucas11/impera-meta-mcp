@@ -1,16 +1,17 @@
-# Impera Meta MCP (app para Mac, somente leitura, vários clientes)
+# Impera Meta MCP (app para Mac e Windows, vários clientes)
 
-Um app com janela própria para cadastrar clientes e seus tokens da BM, e um servidor MCP que dá ao Claude Desktop acesso de leitura às contas de anúncios de cada cliente. Tudo roda e fica guardado só neste Mac.
+Um app com janela própria para cadastrar clientes e seus tokens da BM, e um servidor MCP que dá ao Claude Desktop acesso às contas de anúncios de cada cliente. Tudo roda e fica guardado só neste computador.
 
 <p align="center">
-  <a href="https://github.com/marcelolucas11/impera-meta-mcp/releases/latest/download/impera-meta-mcp.zip"><img src="recursos/botao-baixar-mac.svg" alt="Baixar para Mac" width="340"></a>
+  <a href="https://github.com/marcelolucas11/impera-meta-mcp/releases/latest/download/Impera-Meta-MCP.pkg"><img src="recursos/botao-baixar-mac.svg" alt="Baixar para Mac" width="340"></a>
+  <a href="https://github.com/marcelolucas11/impera-meta-mcp/releases/latest/download/Impera-Meta-MCP-Instalador.exe"><img src="recursos/botao-baixar-windows.svg" alt="Baixar para Windows" width="340"></a>
 </p>
 
 ## Instalar no Mac
 
-1. Clique em **Baixar para Mac** acima. O arquivo `impera-meta-mcp.zip` vai para Downloads.
-2. Abra o zip (duplo clique) e dê duplo clique em **Instalar Impera Meta MCP**.
-3. Na primeira vez, o macOS avisa que não conseguiu verificar o desenvolvedor, porque o app não é assinado pela Apple. Abra **Ajustes do Sistema > Privacidade e Segurança**, role até o aviso do "Instalar Impera Meta MCP" e clique em **Abrir Mesmo Assim**. Depois, dê duplo clique de novo.
+1. Clique em **Baixar para Mac** acima. O instalador `Impera-Meta-MCP.pkg` vai para Downloads.
+2. Dê duplo clique no `Impera-Meta-MCP.pkg` e siga as telas (Continuar, Instalar, senha do Mac).
+3. Na primeira vez, o macOS avisa que não conseguiu verificar o desenvolvedor, porque o instalador não é assinado pela Apple. Abra **Ajustes do Sistema > Privacidade e Segurança**, role até o aviso do "Impera-Meta-MCP.pkg" e clique em **Abrir Mesmo Assim**. Depois, dê duplo clique de novo.
 4. O instalador faz o resto e abre o app. Na primeira instalação, feche o Claude (Cmd+Q) e abra de novo.
 
 Prefere sem aviso nenhum? Cole esta linha no Terminal; ela baixa a versão mais nova, confere o checksum e instala:
@@ -22,12 +23,34 @@ curl -fsSL https://raw.githubusercontent.com/marcelolucas11/impera-meta-mcp/main
 O instalador:
 
 - instala sempre em `~/meta-ads-mcp`, sem apagar clientes, tokens, ajustes ou relatórios que já existam;
-- prepara o Python (se o Mac não tiver Python 3.10+, baixa um próprio com o `uv`, sem senha de administrador);
+- prepara o Python (o `.pkg` baixa um Python próprio com o `uv`, sem depender do Python do Mac);
 - cria o app **Impera Meta MCP** na pasta Aplicativos (e remove o app com o nome antigo, se existir);
 - liga o servidor ao Claude Desktop, com backup do arquivo de configuração;
 - abre o app.
 
-Depois disso, abra o app pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos.
+Depois disso, abra o app pelo Spotlight, pelo Launchpad ou pela pasta Aplicativos. Se algo der errado, o registro da instalação fica em `/tmp/impera-meta-mcp-instalacao.log`.
+
+## Instalar no Windows
+
+1. Clique em **Baixar para Windows** acima. O instalador `Impera-Meta-MCP-Instalador.exe` vai para Downloads.
+2. Dê duplo clique. Na primeira vez, o Windows pode mostrar "O Windows protegeu o computador", porque o instalador não é assinado: clique em **Mais informações** e depois em **Executar assim mesmo**.
+3. Siga as telas. Não precisa de senha de administrador nem de Python instalado: o instalador prepara um Python só para o app (leva de 1 a 3 minutos, com internet).
+4. Na última tela, deixe marcado **Abrir o Impera Meta MCP agora**. Feche o Claude por completo (ícone do Claude perto do relógio, botão direito, **Sair**) e abra de novo.
+
+Também dá para instalar por uma linha no PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/marcelolucas11/impera-meta-mcp/main/instalar-windows.ps1 | iex
+```
+
+No Windows:
+
+- o programa fica em `%USERPROFILE%\meta-ads-mcp` (a mesma estrutura do Mac: `clientes\`, `relatorios\`, `historico\`);
+- o app abre pelo **Menu Iniciar** ou pelo atalho **Impera Meta MCP** na Área de Trabalho, numa janela própria do Chrome ou do Edge;
+- o servidor `meta-ads` é ligado ao Claude Desktop (inclusive na versão do Claude instalada pela Microsoft Store);
+- **Manter em segundo plano** e o cofre no Chaveiro ainda são só do Mac; no Windows o token fica no arquivo do cliente, que só o seu usuário do Windows lê;
+- para desinstalar: **Configurações > Aplicativos > Impera Meta MCP > Desinstalar** (clientes, tokens e relatórios ficam na pasta);
+- se algo der errado, o registro da instalação fica em `%TEMP%\impera-meta-mcp-instalacao.log`.
 
 ## Atualizar
 
@@ -36,7 +59,7 @@ No app, embaixo na coluna da esquerda, clique em **Buscar atualização**. O app
 - Só os arquivos do programa são trocados. Clientes, tokens, ajustes, relatórios e o ambiente Python ficam como estão.
 - O pacote é conferido pelo checksum publicado antes de instalar; se não conferir, nada é alterado.
 - A versão anterior fica guardada em `~/meta-ads-mcp/.versoes-anteriores/`.
-- Depois de atualizar, feche o Claude (Cmd+Q) e abra de novo para ele usar a versão nova do servidor.
+- Depois de atualizar, feche o Claude (Cmd+Q no Mac; no Windows, Sair pelo ícone perto do relógio) e abra de novo para ele usar a versão nova do servidor.
 
 Instalar por cima com o botão de download ou com a linha do Terminal também preserva tudo.
 
@@ -189,7 +212,7 @@ Depois de criar, duplicar ou mudar algo, o app lê de volta na Meta e pausa o qu
 ## Se algo falhar
 
 - O app não abre: no Terminal, `~/meta-ads-mcp/.venv/bin/python ~/meta-ads-mcp/painel.py --abrir`, e veja `~/meta-ads-mcp/painel.log`.
-- O Claude não mostra o servidor: veja `~/Library/Logs/Claude/mcp-server-meta-ads.log`.
+- O Claude não mostra o servidor: veja `~/Library/Logs/Claude/mcp-server-meta-ads.log` (no Windows, `%APPDATA%\Claude\logs\mcp-server-meta-ads.log`).
 - "A Meta recusou o token": expirou ou foi revogado. Troque na ficha do cliente.
 - "Não tem permissão": falta `ads_read` no token ou a conta não está atribuída ao usuário do sistema.
 - Compras zeradas com vendas no Gerenciador: a conta usa conversão personalizada. Na ficha, ponha em "Evento de compra" o tipo `offsite_conversion.custom.<ID>`.
@@ -205,7 +228,10 @@ Depois de criar, duplicar ou mudar algo, o app lê de volta na Meta e pausa o qu
 | `atualizar.py` | Busca e instala versões novas pelas releases do GitHub, preservando os dados do usuário. |
 | `instalar.sh` | Instalador para Mac (também usado pelo duplo clique e pela linha do Terminal). |
 | `instalar-mac.sh` | Instalação por uma linha: baixa a release mais nova, confere o checksum e instala. |
-| `empacotar.sh` | Monta `dist/impera-meta-mcp.zip` e o `.sha256` da release. |
+| `instalar-windows.ps1` | Instalador para Windows (usado pelo `.exe` e pela linha do PowerShell). |
+| `empacotar.sh` | Monta `dist/impera-meta-mcp.zip` e o `.sha256` da release (pacote de atualização). |
+| `instaladores/mac/` | Monta o `Impera-Meta-MCP.pkg` (só num Mac; no GitHub Actions, no runner macOS). |
+| `instaladores/windows/` | Script do Inno Setup que monta o `Impera-Meta-MCP-Instalador.exe` (no runner Windows). |
 | `VERSAO`, `NOVIDADES.md` | Versão atual e o que mudou em cada uma (vira a nota da release e aparece no app). |
 | `recursos/` | Ícone (logo Impera) e a fonte Montserrat (licença OFL). |
 | `testes/` | Testes contra uma API da Meta simulada. |

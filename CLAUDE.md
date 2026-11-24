@@ -10,15 +10,17 @@ História, decisões, estado atual e pendências: `docs/CONTEXTO.md`.
 2. Rodar `bash testes/rodar.sh` (com `CHROMIUM_PATH` se o Playwright não tiver Chromium próprio). Só publicar com tudo passando; teste novo para comportamento novo.
 3. Subir a versão em `VERSAO` (X.Y.Z) e escrever a seção `## X.Y.Z` no topo de `NOVIDADES.md`, em português e do ponto de vista de quem usa o app. Essa seção vira a nota da release e aparece no app em "O que mudou".
 4. Commit em português, explicando o porquê. Push para `main`.
-5. O push na `main` basta: o GitHub Actions (`.github/workflows/publicar.yml`) roda os testes e, se a `VERSAO` ainda não tiver release, cria a tag `vX.Y.Z`, monta `impera-meta-mcp.zip` + `.sha256` com `empacotar.sh` e publica a release como "latest". Não criar tag à mão (o proxy da sessão não permite enviar tags).
-6. Conferir que a release saiu com os dois arquivos. A partir daí o botão "Buscar atualização" do app de todo mundo oferece a versão nova.
+5. O push na `main` basta: o GitHub Actions (`.github/workflows/publicar.yml`) roda os testes (Linux e uma instalação de verdade no Windows) e, se a `VERSAO` ainda não tiver release, cria a tag `vX.Y.Z`, monta `impera-meta-mcp.zip` + `.sha256` com `empacotar.sh`, o `Impera-Meta-MCP.pkg` num runner macOS (`instaladores/mac/montar-pkg.sh`, instalado e conferido no próprio runner) e o `Impera-Meta-MCP-Instalador.exe` num runner Windows (Inno Setup, `instaladores/windows/`, instalado em modo silencioso e conferido), cada um com `.sha256`, e publica a release como "latest". Não criar tag à mão (o proxy da sessão não permite enviar tags).
+6. Conferir que a release saiu com os seis arquivos (zip, pkg e exe, cada um com o `.sha256`). A partir daí o botão "Buscar atualização" do app de todo mundo oferece a versão nova.
 7. Dizer ao Marcelo o que mudou e lembrar: atualizar pelo app e reiniciar o Claude (Cmd+Q).
 
 ## Atualização sem perda de dados
 
 - `atualizar.py` e `instalar.sh` só escrevem arquivos do programa. Nunca tocam em `clientes/`, `historico/`, `.env`, `relatorios/`, `.venv/`, `.painel.json`, `painel.log`, `.aviso-versao`, `.versoes-anteriores/`.
 - Qualquer arquivo novo de dados do usuário precisa entrar nessas duas listas de preservação (e no `.gitignore`) antes de existir.
-- O nome do pacote (`impera-meta-mcp.zip`) e a pasta raiz dele (`impera-meta-mcp/`) não mudam: o app instalado e o botão de download do README dependem deles.
+- O nome do pacote (`impera-meta-mcp.zip`) e a pasta raiz dele (`impera-meta-mcp/`) não mudam: o "Buscar atualização" dos apps instalados e os dois instaladores dependem deles.
+- Os botões do README baixam `Impera-Meta-MCP.pkg` (Mac) e `Impera-Meta-MCP-Instalador.exe` (Windows) da release "latest"; esses nomes também não mudam.
+- `instalar-windows.ps1` tem a mesma lista de preservação do `instalar.sh`; arquivo novo de dados do usuário entra nas três listas.
 
 ## Regras que não mudam
 
@@ -32,6 +34,14 @@ História, decisões, estado atual e pendências: `docs/CONTEXTO.md`.
 - Commits nunca com e-mail pessoal: usar o e-mail `noreply` (do GitHub ou o do Claude).
 - O nome do servidor no Claude Desktop é `meta-ads` e a pasta instalada é `~/meta-ads-mcp`. Mudar qualquer um quebra instalações e instruções de projeto já existentes.
 - Alcance e frequência são deduplicados: nunca somar entre linhas.
+
+## App do Windows
+
+- Mesma pasta (`%USERPROFILE%\meta-ads-mcp`), mesmo `server.py` e mesmo painel. `painel.py --instalar-app` cria atalhos no Menu Iniciar e na Área de Trabalho (PowerShell + WScript.Shell) para `pythonw.exe -X utf8 painel.py --abrir`, que abre o painel numa janela `--app` do Chrome/Edge/Brave.
+- O Claude Desktop sobe o servidor com `python.exe -X utf8 server.py`. O registro vai para `%APPDATA%\Claude` e também para `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` (Claude instalado como MSIX).
+- Processos em separado no Windows usam `CREATE_NO_WINDOW` (`_em_separado()` no painel); a fila de escritas usa `msvcrt` no lugar do `fcntl`.
+- Ainda só no Mac: segundo plano (launchd), cofre no Chaveiro, avisos de versão nova pela Central de Notificações.
+- `testes/test_windows.py` confere uma instalação real; roda no job `windows` do Actions.
 
 ## App do Mac
 
