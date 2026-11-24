@@ -159,7 +159,8 @@ jobs:
           Expand-Archive dist\impera-meta-mcp.zip -DestinationPath dist\win -Force
           $base = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
           Invoke-WebRequest -UseBasicParsing $base -OutFile uv.zip
-          $esperado = ((Invoke-WebRequest -UseBasicParsing "$base.sha256").Content -split '\s+')[0].Trim().ToLower()
+          Invoke-WebRequest -UseBasicParsing "$base.sha256" -OutFile uv.zip.sha256
+          $esperado = ((Get-Content -Raw uv.zip.sha256).Trim() -split '\s+')[0].ToLower()
           if ((Get-FileHash uv.zip -Algorithm SHA256).Hash.ToLower() -ne $esperado) { throw 'uv: checksum não confere' }
           Expand-Archive uv.zip -DestinationPath uvx -Force
           Copy-Item (Get-ChildItem uvx -Recurse -Filter uv.exe | Select-Object -First 1).FullName dist\win\uv.exe
@@ -181,6 +182,20 @@ jobs:
           if ($p.ExitCode -ne 0) { Get-Content inno.log -Tail 40; exit 1 }
           & "$env:USERPROFILE\meta-ads-mcp\.venv\Scripts\python.exe" testes\test_windows.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Instalar pela linha do PowerShell (irm | iex), em outro perfil, baixando e conferindo o pacote
+        shell: powershell
+        run: |
+          $perfil = 'D:\perfil-linha'
+          $env:USERPROFILE = $perfil; $env:APPDATA = "$perfil\AppData\Roaming"; $env:LOCALAPPDATA = "$perfil\AppData\Local"
+          New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $env:PATH = "$PWD\dist\win;$env:PATH"   # o uv.exe já baixado e conferido
+          $env:PAINEL_SEM_JANELA = '1'
+          $env:IMPERA_URL_PACOTE = ([Uri](Resolve-Path dist\impera-meta-mcp.zip).Path).AbsoluteUri
+          Get-Content -Raw -Encoding UTF8 instalar-windows.ps1 | Invoke-Expression
+          $v = (Get-Content -Raw "$perfil\meta-ads-mcp\VERSAO").Trim()
+          if ($v -ne (Get-Content -Raw VERSAO).Trim()) { Write-Host "versão instalada: $v"; exit 1 }
+          if (-not (Test-Path "$env:APPDATA\Claude\claude_desktop_config.json")) { exit 1 }
+          Write-Host "Instalação pela linha conferida ($v)."
       - uses: actions/upload-artifact@v4
         with:
           name: instalador-windows

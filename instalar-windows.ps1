@@ -27,7 +27,9 @@ function Baixar-Pacote {
   $zip = Join-Path $script:Temporaria 'pacote.zip'
   Write-Host 'Baixando a versão mais nova do Impera Meta MCP...'
   Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
-  $esperado = ((Invoke-WebRequest -UseBasicParsing -Uri ($url + '.sha256')).Content -split '\s+')[0].Trim().ToLower()
+  # O .sha256 vem como binário (o .Content seria um byte[]): baixa para arquivo e lê como texto.
+  Invoke-WebRequest -UseBasicParsing -Uri ($url + '.sha256') -OutFile ($zip + '.sha256')
+  $esperado = ((Get-Content -Raw ($zip + '.sha256')).Trim() -split '\s+')[0].ToLower()
   $obtido = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
   if ($esperado -ne $obtido) { throw 'O arquivo baixado não confere com o checksum publicado. Nada foi instalado; tente de novo.' }
   Expand-Archive -Path $zip -DestinationPath $script:Temporaria -Force
