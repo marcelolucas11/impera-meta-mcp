@@ -95,7 +95,7 @@ async def main():
     check("613/1996: uma chamada e bloqueio de ~60 min", n() == 1 and "60 min" in str(r).replace("cerca de 60", "60 min") or "abuso" in str(r), r)
     arq = tmp / ".limites.json"
     texto = arq.read_text() if arq.exists() else ""
-    check("estado gravado em disco, permissão 600, sem token", arq.exists() and stat.S_IMODE(arq.stat().st_mode) == 0o600 and TA not in texto and TB not in texto, oct(stat.S_IMODE(arq.stat().st_mode)) if arq.exists() else "sem arquivo")
+    check("estado gravado em disco, permissão 600, sem token", arq.exists() and (sys.platform.startswith("win") or stat.S_IMODE(arq.stat().st_mode) == 0o600) and TA not in texto and TB not in texto, oct(stat.S_IMODE(arq.stat().st_mode)) if arq.exists() else "sem arquivo")
     protecao._cache_estado.update(mtime=None, dados={}, caminho=None); protecao._memoria.clear(); protecao._limitados.clear()
     zerar()
     r = await get("a", f"act_{A1}/insights")

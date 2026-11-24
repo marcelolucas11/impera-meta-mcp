@@ -172,7 +172,7 @@ async def main():
     check("ativar: um POST por objeto com status=ACTIVE", [(p, f.get("status")) for p, f, _ in enviados] ==
           [("120000000000000001", "ACTIVE"), ("120000000000000021", "ACTIVE")], out.replace("\n", " | ")[:160])
     check("ativar: histórico gravado por cliente, permissão 600", len(hist("alfa")) == 2 and all(h["ok"] for h in hist("alfa"))
-          and oct((tmp / "historico/alfa.jsonl").stat().st_mode & 0o777) == "0o600")
+          and (sys.platform.startswith("win") or oct((tmp / "historico/alfa.jsonl").stat().st_mode & 0o777) == "0o600"))
 
     n = len(POSTS)
     out = await server.alterar_status(ids=["130000000000000001"], acao="pausar", cliente="alfa")
