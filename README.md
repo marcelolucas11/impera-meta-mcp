@@ -7,6 +7,8 @@ Um app com janela própria para cadastrar clientes e seus tokens da BM, e um ser
   <a href="https://github.com/marcelolucas11/impera-meta-mcp/releases/latest/download/Impera-Meta-MCP-Instalador.exe"><img src="recursos/botao-baixar-windows.svg" alt="Baixar para Windows" width="340"></a>
 </p>
 
+> **Primeira vez?** Siga o [tutorial do download ao primeiro relatório](docs/TUTORIAL.md): como a conexão com o Claude funciona, como cadastrar clientes e como começar a puxar dados.
+
 ## Instalar no Mac
 
 1. Clique em **Baixar para Mac** acima. O instalador `Impera-Meta-MCP.pkg` vai para Downloads.
